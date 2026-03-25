@@ -131,7 +131,7 @@ class BaseIngester(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def save(self, records: list[dict], output_path: str) -> None:
+    def save(self, records: list[dict], output_path: str, partition_date: str = None) -> None:
         """
         Persist normalized records to storage.
 
@@ -141,6 +141,9 @@ class BaseIngester(ABC):
             A list of normalized records.
         output_path : str
             Destination path for the saved output.
+        partition_date : str, optional
+            Date string (YYYY-MM-DD) for partitioning. If None, uses current date.
+            When using Airflow, pass {{ ds }} or execution_date for idempotent runs.
 
         Raises
         ------
@@ -149,7 +152,7 @@ class BaseIngester(ABC):
         """
         raise NotImplementedError
 
-    def run(self, query: str, output_path: str, **kwargs) -> list[dict]:
+    def run(self, query: str, output_path: str, partition_date: str = None, **kwargs) -> list[dict]:
         """
         Execute the full ingestion cycle for a single source:
 
@@ -161,6 +164,9 @@ class BaseIngester(ABC):
             The search query or category filter to ingest.
         output_path : str
             Destination path for the saved output.
+        partition_date : str, optional
+            Date string (YYYY-MM-DD) for partitioning. If None, uses current date.
+            When using Airflow, pass {{ ds }} or execution_date for idempotent runs.
         **kwargs : dict
             Additional source-specific parameters forwarded to fetch().
 
@@ -172,5 +178,5 @@ class BaseIngester(ABC):
         self.connect()
         raw_records = self.fetch(query, **kwargs)
         normalized_records = [self.normalize(record) for record in raw_records]
-        self.save(normalized_records, output_path)
+        self.save(normalized_records, output_path, partition_date=partition_date)
         return normalized_records

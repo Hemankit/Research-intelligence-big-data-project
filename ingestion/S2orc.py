@@ -358,7 +358,7 @@ class S2ORCIngester(BaseIngester):
                 return edges
         return []
  
-    def save(self, records: list[dict], output_path: str) -> None:
+    def save(self, records: list[dict], output_path: str, partition_date: str = None) -> None:
         """
         Write normalized paper records and citation edges to storage.
  
@@ -374,6 +374,9 @@ class S2ORCIngester(BaseIngester):
         output_path : str
             Base output path. Files will be written under
             output_path/source=s2orc/date=<YYYY-MM-DD>/.
+        partition_date : str, optional
+            Date string (YYYY-MM-DD) for partitioning. If None, uses current date.
+            In Airflow, pass {{ ds }} or execution_date to ensure idempotent runs.
 
         Raises
         ------
@@ -381,8 +384,8 @@ class S2ORCIngester(BaseIngester):
             If records cannot be written to the target location.
         """
         try:
-            # Get current date for partitioning
-            today = datetime.now().strftime("%Y-%m-%d")
+            # Use provided date or default to current date
+            today = partition_date or datetime.now().strftime("%Y-%m-%d")
             
             # Create partitioned directory structure
             papers_dir = Path(output_path) / "source=s2orc" / f"date={today}"

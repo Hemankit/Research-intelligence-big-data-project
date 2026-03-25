@@ -111,7 +111,7 @@ class OpenAlexIngester(BaseIngester):
         """
         pass
  
-    def save(self, records: list[dict], output_path: str) -> None:
+    def save(self, records: list[dict], output_path: str, partition_date: str = None) -> None:
         """
         Write normalized OpenAlex enrichment records to storage.
  
@@ -126,6 +126,9 @@ class OpenAlexIngester(BaseIngester):
         output_path : str
             Base output path. Files will be written under
             output_path/source=openalex/date=<YYYY-MM-DD>/.
+        partition_date : str, optional
+            Date string (YYYY-MM-DD) for partitioning. If None, uses current date.
+            In Airflow, pass {{ ds }} or execution_date to ensure idempotent runs.
 
         Raises
         ------

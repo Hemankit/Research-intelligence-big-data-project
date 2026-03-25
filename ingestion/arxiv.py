@@ -101,7 +101,7 @@ class ArxivIngester(BaseIngester):
         """
         pass
  
-    def save(self, records: list[dict], output_path: str) -> None:
+    def save(self, records: list[dict], output_path: str, partition_date: str = None) -> None:
         """
         Write a list of normalized arXiv records to storage as JSON or Parquet.
  
@@ -115,6 +115,9 @@ class ArxivIngester(BaseIngester):
         output_path : str
             Base output path. Files will be written under
             output_path/source=arxiv/date=<YYYY-MM-DD>/.
+        partition_date : str, optional
+            Date string (YYYY-MM-DD) for partitioning. If None, uses current date.
+            In Airflow, pass {{ ds }} or execution_date to ensure idempotent runs.
 
         Raises
         ------
