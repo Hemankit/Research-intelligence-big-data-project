@@ -6,7 +6,13 @@ Responsible for querying arXiv by category or keyword, paginating through
 results, extracting paper metadata, and writing normalized records to storage.
 """
  
-from ingestion.base_ingestor import BaseIngester
+from ingestion.base_ingestor2 import (
+    BaseIngester,
+    SourceConnectionError,
+    FetchError,
+    NormalizationError,
+    SaveError,
+)
  
  
 class ArxivIngester(BaseIngester):
@@ -16,18 +22,27 @@ class ArxivIngester(BaseIngester):
     date range. Supports paginated fetching across large result sets.
     """
  
-    def connect(self):
+    def connect(self) -> None:
         """
         Validate that the arXiv API endpoint is reachable.
         arXiv does not require authentication, but this method should
         confirm network access and that the base URL returns a valid response.
         Sets the base URL and default request headers on the instance.
+
+        Raises
+        ------
+        SourceConnectionError
+            If the arXiv API endpoint is unreachable or returns an error.
         """
         pass
  
-    def fetch(self, query: str, **kwargs):
+    def fetch(self, query: str, **kwargs) -> list[dict]:
         """
-        Query the arXiv API and retrieve a batch of raw paper records.
+        Fetch a batch of raw paper metadata from arXiv for bulk ingestion.
+ 
+        Performs BULK metadata retrieval by arXiv category codes, NOT keyword searches.
+        This is part of large-scale ingestion to build a complete metadata index.
+        Query-driven searches happen later during semantic clustering and analysis.
  
         Handles pagination internally using the `start` and `max_results`
         parameters of the arXiv API. Continues fetching until the result
@@ -36,8 +51,9 @@ class ArxivIngester(BaseIngester):
         Parameters
         ----------
         query : str
-            arXiv search query string, typically a category filter
-            (e.g., 'cat:cs.LG') or keyword search (e.g., 'graph neural networks').
+            arXiv category code for bulk ingestion (e.g., 'cs.LG', 'cs.AI', 'math.CO').
+            Use top-level categories (cs.*, math.*, physics.*) to fetch all papers
+            in that domain. NOT for keyword searches.
         **kwargs : dict
             Optional overrides:
             - start (int): Offset for pagination, default 0.
@@ -48,8 +64,13 @@ class ArxivIngester(BaseIngester):
         Returns
         -------
         list[dict]
-            Raw parsed records from the arXiv Atom/XML feed, each containing
-            fields such as id, title, summary, authors, published, and categories.
+            Raw parsed metadata records from the arXiv Atom/XML feed (title, authors,
+            abstract, categories, dates). Full-text PDFs are NOT downloaded at this stage.
+
+        Raises
+        ------
+        FetchError
+            If the API request fails or returns unusable data.
         """
         pass
  
@@ -71,10 +92,16 @@ class ArxivIngester(BaseIngester):
         dict
             Normalized record with keys: paper_id, title, abstract,
             authors, date, source ('arxiv'), categories.
+
+        Raises
+        ------
+        NormalizationError
+            If the raw record is missing required fields or cannot be
+            transformed into the shared schema.
         """
         pass
  
-    def save(self, records: list[dict], output_path: str):
+    def save(self, records: list[dict], output_path: str) -> None:
         """
         Write a list of normalized arXiv records to storage as JSON or Parquet.
  
@@ -88,23 +115,10 @@ class ArxivIngester(BaseIngester):
         output_path : str
             Base output path. Files will be written under
             output_path/source=arxiv/date=<YYYY-MM-DD>/.
-        """
-        pass
- 
-    def run(self, query: str, output_path: str, **kwargs):
-        """
-        Execute the full arXiv ingestion cycle: connect → fetch → normalize → save.
- 
-        Intended to be called directly during development or invoked by
-        Airflow in production. Logs progress and record counts at each stage.
- 
-        Parameters
-        ----------
-        query : str
-            arXiv category or search string.
-        output_path : str
-            Destination path for saved output files.
-        **kwargs : dict
-            Forwarded to fetch() for pagination and date filtering.
+
+        Raises
+        ------
+        SaveError
+            If records cannot be written to the target location.
         """
         pass

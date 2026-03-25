@@ -6,7 +6,13 @@ Responsible for querying OpenAlex for supplementary metadata used to
 enrich paper records from arXiv and S2ORC.
 """
  
-from ingestion.base_ingestor import BaseIngester
+from ingestion.base_ingestor2 import (
+    BaseIngester,
+    SourceConnectionError,
+    FetchError,
+    NormalizationError,
+    SaveError,
+)
  
  
 class OpenAlexIngester(BaseIngester):
@@ -19,7 +25,7 @@ class OpenAlexIngester(BaseIngester):
     for joining in the Spark processing layer.
     """
  
-    def connect(self):
+    def connect(self) -> None:
         """
         Validate access to the OpenAlex REST API.
  
@@ -29,16 +35,21 @@ class OpenAlexIngester(BaseIngester):
         query parameters (including mailto), and confirms the API is reachable.
  
         Reference: https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication
+
+        Raises
+        ------
+        SourceConnectionError
+            If the OpenAlex API endpoint is unreachable or returns an error.
         """
         pass
  
-    def fetch(self, query: str, **kwargs):
+    def fetch(self, query: str, **kwargs) -> list[dict]:
         """
-        Query the OpenAlex API and retrieve enrichment records for a batch of papers.
+        Fetch enrichment metadata from OpenAlex for bulk ingestion.
  
-        Supports two lookup modes:
-        - Search mode: queries the /works endpoint by title keyword or DOI list.
-        - Filter mode: filters by concept, institution, or author ID for bulk pulls.
+        Performs BULK retrieval of citation counts, author IDs, and institutional
+        affiliations to enrich papers already ingested from arXiv and S2ORC.
+        Uses broad filters (concepts, institutions, date ranges), NOT keyword searches.
  
         Handles pagination using OpenAlex's cursor-based pagination to
         safely iterate over large result sets.
@@ -46,11 +57,13 @@ class OpenAlexIngester(BaseIngester):
         Parameters
         ----------
         query : str
-            A title keyword, DOI, or OpenAlex filter expression
-            (e.g., 'graph neural networks' or 'concepts.id:C41008148').
+            OpenAlex filter expression for bulk enrichment pulls:
+            - Concept ID: 'concepts.id:C41008148' (e.g., all ML papers)
+            - Institution: 'institutions.id:I27837315' (e.g., all from Stanford)
+            - Date range: 'from_publication_date:2020-01-01'
+            NOT for title keyword searches or individual DOI lookups.
         **kwargs : dict
             Optional overrides:
-            - mode (str): 'search' or 'filter', default 'search'.
             - per_page (int): Results per page, max 200.
             - fields (list[str]): Specific OpenAlex fields to retrieve,
               e.g., ['doi', 'cited_by_count', 'authorships', 'concepts'].
@@ -59,7 +72,13 @@ class OpenAlexIngester(BaseIngester):
         Returns
         -------
         list[dict]
-            Raw OpenAlex work objects containing requested fields.
+            Raw OpenAlex work objects containing enrichment metadata only
+            (citation counts, disambiguated author IDs, affiliations).
+
+        Raises
+        ------
+        FetchError
+            If the API request fails or returns unusable data.
         """
         pass
  
@@ -83,10 +102,16 @@ class OpenAlexIngester(BaseIngester):
             Enrichment record with keys: doi, cited_by_count,
             author_ids (list of OpenAlex author IDs), institutions (list of
             institution names), and openalex_id.
+
+        Raises
+        ------
+        NormalizationError
+            If the raw record is missing required fields or cannot be
+            transformed into the enrichment schema.
         """
         pass
  
-    def save(self, records: list[dict], output_path: str):
+    def save(self, records: list[dict], output_path: str) -> None:
         """
         Write normalized OpenAlex enrichment records to storage.
  
@@ -101,25 +126,10 @@ class OpenAlexIngester(BaseIngester):
         output_path : str
             Base output path. Files will be written under
             output_path/source=openalex/date=<YYYY-MM-DD>/.
-        """
-        pass
- 
-    def run(self, query: str, output_path: str, **kwargs):
-        """
-        Execute the full OpenAlex enrichment ingestion cycle:
-        connect → fetch → normalize → save.
- 
-        Intended to be run after the primary arXiv and S2ORC ingesters
-        have completed, so that OpenAlex enrichment records can be
-        aligned to already-ingested paper IDs. Logs fetch and save counts.
- 
-        Parameters
-        ----------
-        query : str
-            Title keyword, DOI, or filter expression to query OpenAlex.
-        output_path : str
-            Destination path for saved enrichment records.
-        **kwargs : dict
-            Forwarded to fetch() for mode selection, pagination, and field filters.
+
+        Raises
+        ------
+        SaveError
+            If records cannot be written to the target location.
         """
         pass
