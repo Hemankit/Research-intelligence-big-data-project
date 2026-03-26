@@ -1,0 +1,385 @@
+# docker-compose.yml
+# ──────────────────────────────────────────────────────────────────────────────
+# Full Research Intelligence Pipeline stack
+#
+# Services:
+#   HDFS        — namenode + datanode (Hadoop 3.3)
+#   Spark       — master + worker (Spark 4.1 over HDFS)
+#   Hive        — metastore + hiveserver2 (Hive 3.1)
+#   Airflow     — scheduler + webserver + postgres backend
+#   Elasticsearch — single-node (ES 8.x)
+#
+# Usage:
+#   docker compose up -d              # start everything
+#   docker compose down               # stop everything
+#   docker compose down -v            # stop + wipe all volumes
+#   docker compose logs -f namenode   # tail logs for a specific service
+#
+# Port map (host → container):
+#   9870  → HDFS NameNode Web UI
+#   9000  → HDFS NameNode RPC
+#   8080  → Spark Master Web UI
+#   7077  → Spark Master RPC
+#   10000 → HiveServer2 (JDBC/Thrift)
+#   9083  → Hive Metastore
+#   8085  → Airflow Web UI  (8080 taken by Spark)
+#   9200  → Elasticsearch REST API
+#   9300  → Elasticsearch cluster transport
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Shared network 
+# All services join this network so they can reach each other by service name
+# e.g. Spark can reach HDFS at hdfs://namenode:9000
+networks:
+  pipeline_net:
+    driver: bridge
+
+# Named volumes (data persists across docker compose down)
+volumes:
+  namenode_data:
+  datanode_data:
+  hive_metastore_db:
+  airflow_postgres_db:
+  airflow_logs:
+  elasticsearch_data:
+
+# Shared environment variables 
+x-hadoop-env: &hadoop-env
+  CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+  CORE_CONF_hadoop_http_staticuser_user: hadoop
+  HDFS_CONF_dfs_replication: 1                        # single DataNode → replication=1
+  HDFS_CONF_dfs_permissions_enabled: "false"          # simplify local dev auth
+  HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
+
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+  # Airflow webserver runs on 8080 internally by default
+  # We map host:8085 → container:8080 in the ports section below
+  HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+  SPARK_MASTER_URL: spark://spark-master:7077
+
+services:
+
+  # HDFS: NameNode 
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
+    networks:
+      - pipeline_net
+    ports:
+      - "9870:9870"     # Web UI  — http://localhost:9870
+      - "9000:9000"     # RPC     — hdfs://namenode:9000
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+      - ./docker/hadoop/hadoop-env.sh:/etc/hadoop/hadoop-env.sh
+    environment:
+      <<: *hadoop-env
+      CLUSTER_NAME: research-intelligence
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # HDFS: DataNode
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    hostname: datanode
+    networks:
+      - pipeline_net
+    ports:
+      - "9864:9864"     # DataNode Web UI
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870"
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # HDFS initialisation (one-shot) 
+  # Creates the base directory structure in HDFS on first run.
+  # Exits after completion — this is intentional.
+  hdfs-init:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-init
+    networks:
+      - pipeline_net
+    environment:
+      <<: *hadoop-env
+    depends_on:
+      datanode:
+        condition: service_started
+    entrypoint: >
+      /bin/bash -c "
+        sleep 15 &&
+        hdfs dfs -mkdir -p /user/research-intelligence/raw/arxiv &&
+        hdfs dfs -mkdir -p /user/research-intelligence/raw/s2orc &&
+        hdfs dfs -mkdir -p /user/research-intelligence/raw/openalex &&
+        hdfs dfs -mkdir -p /user/research-intelligence/processed &&
+        hdfs dfs -chmod -R 777 /user/research-intelligence &&
+        echo 'HDFS directories initialised.'
+      "
+    restart: "no"
+
+  # Spark: Master 
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    hostname: spark-master
+    networks:
+      - pipeline_net
+    ports:
+      - "8080:8080"     # Spark Master Web UI — http://localhost:8080
+      - "7077:7077"     # Spark Master RPC
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      SPARK_MASTER_WEBUI_PORT: 8080
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_HADOOP_fs_defaultFS: hdfs://namenode:9000
+    command: >
+      /bin/bash -c "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - ./pipelines:/opt/spark/work-dir/pipelines
+      - ./ingestion:/opt/spark/work-dir/ingestion
+
+  # Spark: Worker 
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    hostname: spark-worker
+    networks:
+      - pipeline_net
+    ports:
+      - "8081:8081"     # Spark Worker Web UI
+    environment:
+      SPARK_WORKER_WEBUI_PORT: 8081
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_HADOOP_fs_defaultFS: hdfs://namenode:9000
+    command: >
+      /bin/bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    depends_on:
+      - spark-master
+    volumes:
+      - ./pipelines:/opt/spark/work-dir/pipelines
+      - ./ingestion:/opt/spark/work-dir/ingestion
+
+  # Hive: Metastore database (PostgreSQL) 
+  hive-metastore-db:
+    image: postgres:15
+    container_name: hive-metastore-db
+    hostname: hive-metastore-db
+    networks:
+      - pipeline_net
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    volumes:
+      - hive_metastore_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Hive: Metastore service 
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    hostname: hive-metastore
+    networks:
+      - pipeline_net
+    ports:
+      - "9083:9083"     # Metastore Thrift
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870 hive-metastore-db:5432"
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName: org.postgresql.Driver
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName: hive
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword: hive
+      HIVE_SITE_CONF_datanucleus_autoCreateSchema: "true"
+    volumes:
+      - ./docker/hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+
+  # Hive: HiveServer2 
+  hiveserver2:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hiveserver2
+    hostname: hiveserver2
+    networks:
+      - pipeline_net
+    ports:
+      - "10000:10000"   # JDBC/Thrift — connect with beeline or PyHive
+      - "10002:10002"   # HiveServer2 Web UI
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "hive-metastore:9083"
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName: org.postgresql.Driver
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName: hive
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword: hive
+    volumes:
+      - ./docker/hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+    depends_on:
+      - hive-metastore
+
+  # Airflow: Postgres backend
+  airflow-postgres:
+    image: postgres:15
+    container_name: airflow-postgres
+    hostname: airflow-postgres
+    networks:
+      - pipeline_net
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_postgres_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Airflow: DB init (one-shot)
+  # Uses `command` not `entrypoint` so the official Airflow image's
+  # entrypoint script runs first and puts the airflow binary on PATH.
+  airflow-init:
+    image: apache/airflow:2.9.1
+    container_name: airflow-init
+    networks:
+      - pipeline_net
+    environment:
+      <<: *airflow-env
+      # Required by Airflow — generates a stable key for encrypting DB secrets
+      AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY="
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _AIRFLOW_WWW_USER_FIRSTNAME: Admin
+      _AIRFLOW_WWW_USER_LASTNAME: User
+      _AIRFLOW_WWW_USER_ROLE: Admin
+      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    command: version
+    restart: "no"
+
+  # Airflow: Scheduler 
+  airflow-scheduler:
+    image: apache/airflow:2.9.1
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    networks:
+      - pipeline_net
+    environment:
+      <<: *airflow-env
+      AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY="
+    volumes:
+      - ./dags:/opt/airflow/dags           # mount DAG files here
+      - ./pipelines:/opt/airflow/pipelines
+      - ./ingestion:/opt/airflow/ingestion
+      - airflow_logs:/opt/airflow/logs
+      - ./.env:/opt/airflow/.env
+    command: scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Airflow: Webserver 
+  airflow-webserver:
+    image: apache/airflow:2.9.1
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    networks:
+      - pipeline_net
+    ports:
+      - "8085:8080"     # Airflow Web UI — http://localhost:8085 (maps to internal 8080)
+    environment:
+      <<: *airflow-env
+      AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY="
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./pipelines:/opt/airflow/pipelines
+      - ./ingestion:/opt/airflow/ingestion
+      - airflow_logs:/opt/airflow/logs
+      - ./.env:/opt/airflow/.env
+    command: webserver
+    depends_on:
+      - airflow-scheduler
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Elasticsearch 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    hostname: elasticsearch
+    networks:
+      - pipeline_net
+    ports:
+      - "9200:9200"     # REST API — http://localhost:9200
+      - "9300:9300"     # Cluster transport
+    environment:
+      # Single-node mode — no cluster setup needed for local dev
+      discovery.type: single-node
+      # Disable security for local dev (enable for any real deployment)
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      # Memory settings 
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
