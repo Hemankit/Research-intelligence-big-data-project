@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  docker/hive/hive-site.xml
+  Mounted into both hive-metastore and hiveserver2 containers.
+  Points Hive at the PostgreSQL metastore DB and the HDFS cluster.
+-->
+<configuration>
+
+  <!--Metastore connection-->
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:postgresql://hive-metastore-db/metastore</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.postgresql.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>datanucleus.autoCreateSchema</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>datanucleus.fixedDatastore</name>
+    <value>false</value>
+  </property>
+
+  <!--Metastore URI (used by HiveServer2 and Spark to find the metastore)-->
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://hive-metastore:9083</value>
+  </property>
+
+  <!--HDFS warehouse directory-->
+  <!-- Where Hive stores managed table data in HDFS -->
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>hdfs://namenode:9000/user/hive/warehouse</value>
+  </property>
+
+  <!--HiveServer2 settings-->
+  <property>
+    <name>hive.server2.thrift.port</name>
+    <value>10000</value>
+  </property>
+  <property>
+    <name>hive.server2.thrift.bind.host</name>
+    <value>0.0.0.0</value>
+  </property>
+  <!-- Disable auth for local dev -->
+  <property>
+    <name>hive.server2.authentication</name>
+    <value>NONE</value>
+  </property>
+
+  <!--Scratch dir-->
+  <property>
+    <name>hive.exec.scratchdir</name>
+    <value>hdfs://namenode:9000/tmp/hive</value>
+  </property>
+  <property>
+    <name>hive.scratch.dir.permission</name>
+    <value>777</value>
+  </property>
+
+  <!--Performance: enable vectorized query execution-->
+  <property>
+    <name>hive.vectorized.execution.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>hive.vectorized.execution.reduce.enabled</name>
+    <value>true</value>
+  </property>
+
+</configuration>
