@@ -12,7 +12,8 @@ No extra Python library needed.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -24,7 +25,7 @@ class HDFSClient:
     Writes JSON-serialisable records to HDFS via the WebHDFS REST API.
 
     Parameters
-    
+    ----------
     host : str
         Hostname or IP of the HDFS NameNode. Reads HDFS_HOST env var if not
         passed explicitly.
@@ -50,11 +51,25 @@ class HDFSClient:
         self.base_path = base_path
         self.base_url = f"http://{self.host}:{self.port}/webhdfs/v1"
 
-    #Internal helpers
+    # Internal helpers
 
     def _url(self, hdfs_path: str) -> str:
         """Build a full WebHDFS URL for a given HDFS path."""
         return f"{self.base_url}{hdfs_path}?user.name={self.user}"
+
+    def _rewrite_datanode_url(self, url: str) -> str:
+        """
+        Rewrite the DataNode redirect URL so it points to localhost
+        instead of the internal Docker hostname.
+
+        When running scripts from the host machine, the NameNode returns
+        a redirect like http://datanode:9864/... — the 'datanode' hostname
+        only exists inside Docker's network. We replace the host portion
+        with localhost so Docker's port mapping handles the routing.
+        """
+        parsed = urlparse(url)
+        rewritten = parsed._replace(netloc=f"localhost:{parsed.port}")
+        return urlunparse(rewritten)
 
     def _mkdirs(self, hdfs_path: str) -> None:
         """Create a directory (and parents) on HDFS if it does not exist."""
@@ -62,7 +77,7 @@ class HDFSClient:
         resp = requests.put(url)
         resp.raise_for_status()
 
-    #Public API
+    # Public API
 
     def write_json(self, records: list[dict], source: str, category: str = "general") -> str:
         """
@@ -73,7 +88,7 @@ class HDFSClient:
             {base_path}/raw/{source}/{category}/{YYYY-MM-DD}/{timestamp}.jsonl
 
         Parameters
-        
+        ----------
         records : list[dict]
             The paper records to persist.
         source : str
@@ -82,7 +97,7 @@ class HDFSClient:
             arXiv category or domain label, e.g. 'cs.LG'.
 
         Returns
-        
+        -------
         str
             The full HDFS path the file was written to.
         """
@@ -90,8 +105,8 @@ class HDFSClient:
             logger.warning("write_json called with empty records list — skipping.")
             return ""
 
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         dir_path = f"{self.base_path}/raw/{source}/{category}/{today}"
         file_path = f"{dir_path}/{timestamp}.jsonl"
 
@@ -106,8 +121,12 @@ class HDFSClient:
         resp = requests.put(create_url, allow_redirects=False)
 
         if resp.status_code == 307:
-            # Follow redirect to DataNode and upload data
+            # The NameNode redirects to the DataNode using its internal Docker
+            # hostname (e.g. 'datanode:9864'). When running scripts from the
+            # host machine this hostname can't be resolved — rewrite it to
+            # localhost so the upload goes through Docker's port mapping instead.
             datanode_url = resp.headers["Location"]
+            datanode_url = self._rewrite_datanode_url(datanode_url)
             upload_resp = requests.put(
                 datanode_url,
                 data=payload.encode("utf-8"),

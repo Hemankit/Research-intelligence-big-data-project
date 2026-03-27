@@ -16,3 +16,9 @@ docker compose down -v
 
 # View localhost ports using this command
 docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+
+# ArXiv commands for small incremental ingetions
+python -m ingestion.arxiv
+python -m ingestion.arxiv --lookback 7
+# ArXiv commands for bulk ingestions (may result in 429s from server side)
+python -m ingestion.arxiv --bulk --max 1000 --batch-size 200
