@@ -5,7 +5,7 @@ Ingestion of papers from the arXiv API.
 
 Supports two modes:
 
-  INCREMENTAL (default — run daily via Airflow):
+  INCREMENTAL (Daily via Airflow):
       Pulls papers submitted in the last N days per category.
       Safe for daily scheduling, low memory usage.
 
@@ -132,7 +132,7 @@ def ingest_arxiv(
     hdfs_client: HDFSClient = None,
 ) -> dict[str, int]:
     """
-    Incremental ingestion — pulls papers from the last N days.
+    Incremental ingestion: Pulls papers from the last N days.
     Called daily by the Airflow DAG.
 
     Parameters
@@ -200,7 +200,7 @@ def bulk_ingest_arxiv(
     hdfs_client: HDFSClient = None,
 ) -> dict[str, int]:
     """
-    Bulk ingestion — pulls the full historical corpus per category
+    Bulk ingestion: Pulls the full historical corpus per category
     with no date filter. Writes to HDFS in batches so memory stays
     flat regardless of how many papers are fetched.
 
