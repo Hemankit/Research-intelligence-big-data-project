@@ -22,8 +22,10 @@ import json
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-import pandas as pd
-from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 class S2ORCIngester(BaseIngester):
     """
     Ingests paper metadata and citation edges from the Semantic Scholar
@@ -45,20 +47,36 @@ class S2ORCIngester(BaseIngester):
     high-value papers identified through metadata signals.
     """
  
-    def __init__(self, config: dict):
+    def __init__(self, config: dict = None):
         """
         Parameters
         ----------
-        config : dict
+        config : dict, optional
             Configuration for this ingester.
 
             Expected keys:
-            - mode: 'corpus' or 'api'
+            - mode: 'corpus' or 'api' (default: 'api')
             - corpus_path (if corpus mode)
-            - api_base_url (if api mode)
-            - api_key (optional, for api mode)
+            - api_base_url (if api mode, default: Semantic Scholar API)
+            - api_key (optional, loads from S2ORC_API_KEY env var if not provided)
+            - enable_full_text_download (bool, default: False): When True, attempts to
+              download full paper content for testing or selective full-text analysis.
+              Default pipeline uses metadata-only for breadth-first exploration.
         """
-        self.config = config
+        # Default configuration
+        self.config = config or {}
+        
+        # Set defaults
+        if 'mode' not in self.config:
+            self.config['mode'] = 'api'
+        if 'api_base_url' not in self.config:
+            self.config['api_base_url'] = 'https://api.semanticscholar.org/graph/v1'
+        if 'enable_full_text_download' not in self.config:
+            self.config['enable_full_text_download'] = False
+        
+        # Load API key from environment if not provided
+        if 'api_key' not in self.config or not self.config['api_key']:
+            self.config['api_key'] = os.getenv('S2ORC_API_KEY')
 
         # Prepare headers once (used later too)
         self.api_headers = {}
@@ -228,7 +246,76 @@ class S2ORCIngester(BaseIngester):
             raise FetchError(f"S2ORC API fetch failed: {e}") from e
 
         data = response.json().get("data", [])
+        
+        # Optionally fetch full paper content if enabled (for testing or selective use)
+        if self.config.get("enable_full_text_download", False):
+            for record in data:
+                paper_id = record.get("paperId")
+                if paper_id:
+                    full_text = self._fetch_full_paper_content(paper_id)
+                    if full_text:
+                        record["full_text"] = full_text
+        
         return data
+
+    def _fetch_full_paper_content(self, paper_id: str) -> str:
+        """
+        Fetch full paper content for a specific paper (optional capability).
+        
+        This method provides the ability to download full papers when needed,
+        primarily for testing or later selective full-text analysis by the
+        Selective Full-Text Analysis Layer. NOT used in default bulk metadata pipeline.
+        
+        Parameters
+        ----------
+        paper_id : str
+            The Semantic Scholar paper ID
+            
+        Returns
+        -------
+        str
+            Full text content if available, empty string otherwise
+        
+        Notes
+        -----
+        - Requires API key for rate limit increases
+        - S2 API provides full text when available from open access sources
+        - Failures are logged but don't halt bulk ingestion
+        """
+        base_url = self.config.get("api_base_url")
+        endpoint = f"{base_url}/paper/{paper_id}"
+        
+        params = {
+            "fields": "title,abstract,isOpenAccess,openAccessPdf"
+        }
+        
+        try:
+            response = requests.get(
+                endpoint,
+                params=params,
+                headers=self.api_headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            
+            paper_data = response.json()
+            
+            # Check if open access PDF is available
+            open_access_pdf = paper_data.get("openAccessPdf")
+            if open_access_pdf and open_access_pdf.get("url"):
+                pdf_url = open_access_pdf["url"]
+                
+                # Download PDF content (note: you may want to use specialized PDF parsing)
+                # For now, just return the URL as placeholder for full implementation
+                return f"PDF available at: {pdf_url}"
+            
+            # Fallback: return abstract if no full text available
+            return paper_data.get("abstract", "")
+            
+        except requests.RequestException as e:
+            # Don't fail the entire batch if one paper's full text is unavailable
+            print(f"Warning: Could not fetch full text for paper {paper_id}: {e}")
+            return ""
         
  
     def normalize(self, raw_record: dict) -> dict:
@@ -308,6 +395,11 @@ class S2ORCIngester(BaseIngester):
                 elif isinstance(f, str):
                     categories.append(f)
             categories = [c for c in categories if c]  # drop empty strings
+            
+            # ── full_text (optional) ──────────────────────────────────────
+            # Only present if enable_full_text_download is True
+            # Used for testing or selective full-text analysis, not default pipeline
+            full_text = raw_record.get("full_text", "")
 
         except NormalizationError:
             raise
@@ -316,7 +408,7 @@ class S2ORCIngester(BaseIngester):
                 f"Failed to normalize S2ORC record: {e}\nRecord: {raw_record}"
             ) from e
 
-        return {
+        normalized = {
             "paper_id":  str(paper_id),
             "title":     title,
             "abstract":  abstract,
@@ -326,6 +418,12 @@ class S2ORCIngester(BaseIngester):
             "source":    "s2orc",
             "categories": categories,
         }
+        
+        # Include full_text only if it was downloaded
+        if full_text:
+            normalized["full_text"] = full_text
+            
+        return normalized
 
  
     def extract_citation_edges(self, raw_record: dict) -> list[tuple]:

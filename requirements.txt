@@ -1,3 +1,7 @@
 boto3
 tqdm
 arxiv
+requests
+pandas
+pyarrow
+python-dotenv
