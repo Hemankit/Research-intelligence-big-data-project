@@ -5,7 +5,7 @@ Ingester for the Semantic Scholar Open Research Corpus (S2ORC).
 Responsible for loading and processing the S2ORC dataset, extracting
 paper metadata, full-text content where available, and citation edge lists.
 
-Fixes applied over teammate's version:
+Fixes applied:
   1. paper_id now uses arXiv ID (from externalIds.ArXiv) so it matches
      the arXiv corpus and Spark joins work correctly. Falls back to
      S2ORC corpusid/paperId only if no arXiv ID is available.
@@ -20,7 +20,7 @@ Fixes applied over teammate's version:
      - strips 'references'/'citations' which bulk endpoint doesn't support
      - uses cursor token pagination (not numeric offset)
 
-Preserved from teammate's version:
+Preserved:
   - Auto-loads S2ORC_API_KEY from .env via load_dotenv()
   - Sensible __init__ defaults (mode='api', api_base_url set automatically)
   - enable_full_text_download config flag and _fetch_full_paper_content()
@@ -108,7 +108,7 @@ class S2ORCIngester(BaseIngester):
         if self.config.get("api_key"):
             self.api_headers["x-api-key"] = self.config["api_key"]
 
-        # Initialise HDFSClient — used by save() to write to HDFS
+        # Initialise HDFSClient: Used by save() to write to HDFS
         self.hdfs = HDFSClient(
             host      = self.config.get("hdfs_host"),
             port      = int(self.config.get("hdfs_port", 9870)),
