@@ -160,7 +160,7 @@ def task_enrich_s2orc(ti, **kwargs) -> None:
     from dotenv import load_dotenv
     load_dotenv("/opt/airflow/.env")
 
-    from ingestion.s2orc import enrich_papers
+    from ingestion.S2orc import enrich_papers
     from ingestion.hdfs_client import HDFSClient
 
     paper_ids: list[str] = (
@@ -215,7 +215,7 @@ def task_enrich_openalex(ti, **kwargs) -> None:
     from dotenv import load_dotenv
     load_dotenv("/opt/airflow/.env")
 
-    from ingestion.openalex import enrich_openalex
+    from ingestion.Openalex import enrich_openalex
     from ingestion.hdfs_client import HDFSClient
 
     paper_ids: list[str] = (

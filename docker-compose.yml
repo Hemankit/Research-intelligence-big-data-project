@@ -47,6 +47,10 @@ volumes:
 x-hadoop-env: &hadoop-env
   CORE_CONF_fs_defaultFS: hdfs://namenode:9000
   CORE_CONF_hadoop_http_staticuser_user: hadoop
+  CORE_CONF_hadoop_proxyuser_root_hosts: "*"
+  CORE_CONF_hadoop_proxyuser_root_groups: "*"
+  CORE_CONF_hadoop_proxyuser_hive_hosts: "*"
+  CORE_CONF_hadoop_proxyuser_hive_groups: "*"
   HDFS_CONF_dfs_replication: 1                        # single DataNode → replication=1
   HDFS_CONF_dfs_permissions_enabled: "false"          # simplify local dev auth
   HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
@@ -72,8 +76,8 @@ services:
     networks:
       - pipeline_net
     ports:
-      - "9870:9870"     # Web UI  — http://localhost:9870
-      - "9000:9000"     # RPC     — hdfs://namenode:9000
+      - "9870:9870"     # Web UI: http://localhost:9870
+      - "9000:9000"     # RPC: hdfs://namenode:9000
     volumes:
       - namenode_data:/hadoop/dfs/name
       - ./docker/hadoop/hadoop-env.sh:/etc/hadoop/hadoop-env.sh
@@ -137,7 +141,7 @@ services:
     networks:
       - pipeline_net
     ports:
-      - "8080:8080"     # Spark Master Web UI — http://localhost:8080
+      - "8080:8080"     # Spark Master Web UI: http://localhost:8080
       - "7077:7077"     # Spark Master RPC
     environment:
       SPARK_MASTER_HOST: spark-master
@@ -197,6 +201,8 @@ services:
       POSTGRES_DB: metastore
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
+      POSTGRES_HOST_AUTH_METHOD: md5             
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"    
     volumes:
       - hive_metastore_db:/var/lib/postgresql/data
     healthcheck:
@@ -204,6 +210,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Hive: Schema init (one-shot)
+  # Initializes the Hive metastore schema in Postgres on first boot.
+  # Idempotent: succeeds silently if schema already exists.
+  hive-schema-init:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-schema-init
+    networks:
+      - pipeline_net
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command: ["printf '%s\n' '<?xml version=\"1.0\"?>' '<configuration>' '<property><name>javax.jdo.option.ConnectionURL</name><value>jdbc:postgresql://hive-metastore-db/metastore</value></property>' '<property><name>javax.jdo.option.ConnectionDriverName</name><value>org.postgresql.Driver</value></property>' '<property><name>javax.jdo.option.ConnectionUserName</name><value>hive</value></property>' '<property><name>javax.jdo.option.ConnectionPassword</name><value>hive</value></property>' '<property><name>hive.metastore.schema.verification</name><value>false</value></property>' '</configuration>' > /opt/hive/conf/hive-site.xml && /opt/hive/bin/schematool -dbType postgres -info 2>/dev/null && echo Schema_exists || /opt/hive/bin/schematool -dbType postgres -initSchema"]
+    restart: "no"
 
   # Hive: Metastore service 
   hive-metastore:
@@ -217,19 +240,24 @@ services:
     environment:
       <<: *hadoop-env
       SERVICE_PRECONDITION: "namenode:9870 hive-metastore-db:5432"
-      HIVE_METASTORE_URI: thrift://hive-metastore:9083
       HIVE_SITE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
       HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName: org.postgresql.Driver
       HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName: hive
       HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword: hive
       HIVE_SITE_CONF_datanucleus_autoCreateSchema: "true"
-    volumes:
-      - ./docker/hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      HIVE_SITE_CONF_hive_metastore_uris: "thrift://hive-metastore:9083"
+      HIVE_SITE_CONF_hive_metastore_schema_verification: "false"
+    command:
+      - "/opt/hive/bin/hive"
+      - "--service"
+      - "metastore"
     depends_on:
       hive-metastore-db:
         condition: service_healthy
       namenode:
         condition: service_healthy
+      hive-schema-init:
+        condition: service_completed_successfully
 
   # Hive: HiveServer2 
   hiveserver2:
@@ -239,18 +267,20 @@ services:
     networks:
       - pipeline_net
     ports:
-      - "10000:10000"   # JDBC/Thrift — connect with beeline or PyHive
+      - "10000:10000"   # JDBC/Thrift
       - "10002:10002"   # HiveServer2 Web UI
     environment:
       <<: *hadoop-env
       SERVICE_PRECONDITION: "hive-metastore:9083"
-      HIVE_METASTORE_URI: thrift://hive-metastore:9083
       HIVE_SITE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
       HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName: org.postgresql.Driver
       HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName: hive
       HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword: hive
-    volumes:
-      - ./docker/hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      HIVE_SITE_CONF_hive_metastore_uris: "thrift://hive-metastore:9083"
+    command:
+      - "/opt/hive/bin/hive"
+      - "--service"
+      - "hiveserver2"
     depends_on:
       - hive-metastore
 
@@ -283,7 +313,7 @@ services:
       - pipeline_net
     environment:
       <<: *airflow-env
-      # Required by Airflow — generates a stable key for encrypting DB secrets
+      # Required by Airflow: generates a stable key for encrypting DB secrets
       AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY="
       _AIRFLOW_DB_MIGRATE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
@@ -362,7 +392,7 @@ services:
       - "9200:9200"     # REST API — http://localhost:9200
       - "9300:9300"     # Cluster transport
     environment:
-      # Single-node mode — no cluster setup needed for local dev
+      # Single-node mode: no cluster setup needed for local dev
       discovery.type: single-node
       # Disable security for local dev (enable for any real deployment)
       xpack.security.enabled: "false"
