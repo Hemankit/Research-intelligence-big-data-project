@@ -25,3 +25,6 @@ python -m ingestion.arxiv --bulk --max 1000 --batch-size 200
 
 # OpenAlex Testing (use arXiv ID's already in the HDFS database since OpenAlex is a bibliographic database)
 python -m ingestion.Openalex --ids 2603.24594 2603.24587 2603.24580 2603.24567 2603.24562 --category cs.LG
+
+# Spark Consolidator
+MSYS_NO_PATHCONV=1 docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/work-dir/pipelines/spark_consolidate.py

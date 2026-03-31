@@ -1,12 +1,12 @@
 """
 hdfs_client.py
-
+--------------
 Thin wrapper around the WebHDFS REST API.
 All three ingesters use this to write files to HDFS so that
 storage logic is never duplicated across arxiv.py / s2orc.py / openalex.py.
 
 WebHDFS runs on port 9870 by default on the NameNode.
-No extra Python library needed.
+No extra Python library needed — just the standard requests package.
 """
 
 import json
@@ -51,7 +51,7 @@ class HDFSClient:
         self.base_path = base_path
         self.base_url = f"http://{self.host}:{self.port}/webhdfs/v1"
 
-    # Internal helpers
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _url(self, hdfs_path: str) -> str:
         """Build a full WebHDFS URL for a given HDFS path."""
@@ -77,7 +77,7 @@ class HDFSClient:
         resp = requests.put(url)
         resp.raise_for_status()
 
-    # Public API
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def write_json(self, records: list[dict], source: str, category: str = "general") -> str:
         """
@@ -148,9 +148,38 @@ class HDFSClient:
     def read_json(self, hdfs_path: str) -> list[dict]:
         """
         Read a newline-delimited JSON file from HDFS and return
-        a list of dicts. Useful for testing and validation.
+        a list of dicts.
+
+        Handles the WebHDFS two-step redirect — NameNode redirects to
+        DataNode using its internal Docker hostname. We rewrite it to
+        localhost so the read works from the host machine.
+
+        Uses streaming to handle large files without loading the entire
+        response into memory at once — important for files with tens of
+        thousands of records.
         """
-        url = self._url(hdfs_path) + "&op=OPEN"
-        resp = requests.get(url)
+        url  = self._url(hdfs_path) + "&op=OPEN"
+        resp = requests.get(url, allow_redirects=False)
+
+        if resp.status_code == 307:
+            # Rewrite internal Docker DataNode hostname to localhost
+            datanode_url = self._rewrite_datanode_url(resp.headers["Location"])
+            # Stream the response so large files don't get truncated
+            resp = requests.get(datanode_url, stream=True)
+
         resp.raise_for_status()
-        return [json.loads(line) for line in resp.text.strip().splitlines() if line]
+
+        records = []
+        # iter_lines() handles chunked streaming correctly — each line
+        # is a complete JSON record in the JSONL format
+        for line in resp.iter_lines(decode_unicode=True):
+            line = line.strip() if line else ""
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "Skipping malformed JSON line in %s: %s",
+                        hdfs_path, e
+                    )
+        return records
