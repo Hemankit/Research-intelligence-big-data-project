@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 spark_consolidate.py — Spark Consolidation Job
-================================================
+
 Reads raw JSONL files from all three ingestion sources in HDFS
 (arXiv, S2ORC, OpenAlex), deduplicates and merges by paper_id,
 and writes the result as Parquet into the Hive `research_intel.papers` table.
@@ -42,13 +42,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spark_consolidate")
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# Constants 
 
 HDFS_BASE = "hdfs://namenode:9000/user/research-intelligence/raw"
 HIVE_DB = "research_intel"
 HIVE_TABLE = "papers"
 
-# ── Schema for each source ────────────────────────────────────────────────────
+# Schema for each source 
 # We read as JSON with permissive mode — fields not present become null.
 
 UNIFIED_SCHEMA = StructType([
@@ -68,7 +68,7 @@ UNIFIED_SCHEMA = StructType([
 ])
 
 
-# ── Helper: read + normalize each source ──────────────────────────────────────
+# Helper: read + normalize each source 
 
 def read_arxiv(spark: SparkSession) -> DataFrame:
     """Read arXiv JSONL and normalize to unified schema."""
@@ -172,7 +172,7 @@ def read_openalex(spark: SparkSession) -> DataFrame:
     )
 
 
-# ── Merge logic ───────────────────────────────────────────────────────────────
+# Merge logic 
 
 def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFrame) -> DataFrame:
     """
@@ -237,7 +237,7 @@ def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFra
     return merged
 
 
-# ── Add Hive-compatible columns ───────────────────────────────────────────────
+# Add Hive-compatible columns 
 
 def prepare_for_hive(df: DataFrame) -> DataFrame:
     """
@@ -286,7 +286,7 @@ def prepare_for_hive(df: DataFrame) -> DataFrame:
     )
 
 
-# ── Write to Hive ─────────────────────────────────────────────────────────────
+# Write to Hive 
 
 def write_to_hive(df: DataFrame) -> None:
     """
@@ -309,7 +309,7 @@ def write_to_hive(df: DataFrame) -> None:
     logger.info("Successfully wrote to %s", table)
 
 
-# ── Citation edges → Hive ─────────────────────────────────────────────────────
+# Citation edges → Hive 
 
 def consolidate_edges(spark: SparkSession) -> None:
     """
@@ -349,7 +349,7 @@ def consolidate_edges(spark: SparkSession) -> None:
     logger.info("Successfully wrote citation edges to %s", table)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main 
 
 def main():
     parser = argparse.ArgumentParser(description="Spark consolidation job")

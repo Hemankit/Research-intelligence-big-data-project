@@ -118,7 +118,7 @@ class S2ORCIngester(BaseIngester):
             ),
         )
 
-    # ── connect ───────────────────────────────────────────────────────────────
+    # connect 
 
     def connect(self) -> None:
         """Validate access to S2ORC (local corpus or API)."""
@@ -159,7 +159,7 @@ class S2ORCIngester(BaseIngester):
                 f"Unexpected error during S2ORC connection: {e}"
             ) from e
 
-    # ── fetch ─────────────────────────────────────────────────────────────────
+    # fetch 
 
     def fetch(self, query: str, **kwargs) -> list[dict]:
         """
@@ -402,7 +402,7 @@ class S2ORCIngester(BaseIngester):
             )
             return ""
 
-    # ── normalize ─────────────────────────────────────────────────────────────
+    # normalize 
 
     def normalize(self, raw_record: dict) -> dict:
         """
@@ -450,13 +450,13 @@ class S2ORCIngester(BaseIngester):
             if arxiv_id and "v" in str(arxiv_id):
                 paper_id = str(arxiv_id).split("v")[0]
 
-            # ── title ────────────────────────────────────────────────────
+            # title 
             title = (raw_record.get("title") or "").strip()
 
-            # ── abstract ─────────────────────────────────────────────────
+            # abstract 
             abstract = (raw_record.get("abstract") or "").strip()
 
-            # ── authors ──────────────────────────────────────────────────
+            # authors 
             raw_authors = raw_record.get("authors") or []
             authors = [
                 a["name"]
@@ -464,14 +464,14 @@ class S2ORCIngester(BaseIngester):
                 if isinstance(a, dict) and a.get("name")
             ]
 
-            # ── date ─────────────────────────────────────────────────────
+            # date
             date = (
                 raw_record.get("publicationDate")
                 or str(raw_record.get("year", ""))
                 or None
             )
 
-            # ── venue / categories ────────────────────────────────────────
+            # venue / categories 
             raw_venue = (
                 raw_record.get("venue")
                 or raw_record.get("publicationVenue")
@@ -490,7 +490,7 @@ class S2ORCIngester(BaseIngester):
                     categories.append(f)
             categories = [c for c in categories if c]
 
-            # ── additional S2ORC-specific fields ──────────────────────────
+            # additional S2ORC-specific fields 
             citation_count  = raw_record.get("citationCount", 0)
             reference_count = raw_record.get("referenceCount", 0)
             is_open_access  = raw_record.get("isOpenAccess", False)
@@ -500,7 +500,7 @@ class S2ORCIngester(BaseIngester):
             s2_paper_id     = raw_record.get("paperId", "")
             doi             = external_ids.get("DOI", "")
 
-            # ── full_text (optional) ──────────────────────────────────────
+            # full_text (optional) 
             # Only present if enable_full_text_download=True was set
             full_text = raw_record.get("full_text", "")
 
@@ -535,8 +535,7 @@ class S2ORCIngester(BaseIngester):
 
         return normalized
 
-    # ── extract_citation_edges ────────────────────────────────────────────────
-
+    # extract_citation_edges 
     def extract_citation_edges(self, raw_record: dict) -> list[dict]:
         """
         Extract citation edges from a single RAW S2ORC record.
@@ -599,7 +598,7 @@ class S2ORCIngester(BaseIngester):
 
         return edges
 
-    # ── save ─────────────────────────────────────────────────────────────────
+    # save 
 
     def save(
         self,
@@ -650,7 +649,7 @@ class S2ORCIngester(BaseIngester):
                 f"Failed to save S2ORC records to HDFS: {e}"
             ) from e
 
-    # ── run (override) ────────────────────────────────────────────────────────
+    # run (override) 
 
     def run(
         self,
@@ -690,7 +689,7 @@ class S2ORCIngester(BaseIngester):
         raw_records = self.fetch(query, **kwargs)
         logger.info("Fetched %d raw S2ORC records", len(raw_records))
 
-        # ── Extract edges from RAW records BEFORE normalization ───────────
+        # Extract edges from RAW records BEFORE normalization
         # Critical: base class normalizes first which strips
         # references/citations fields making edge extraction impossible.
         all_edges: list[dict] = []
@@ -698,7 +697,7 @@ class S2ORCIngester(BaseIngester):
             all_edges.extend(self.extract_citation_edges(raw))
         logger.info("Extracted %d citation edges", len(all_edges))
 
-        # ── Normalize ─────────────────────────────────────────────────────
+        # Normalize 
         normalized: list[dict] = []
         for raw in raw_records:
             try:
@@ -710,7 +709,7 @@ class S2ORCIngester(BaseIngester):
 
         logger.info("Normalized %d records", len(normalized))
 
-        # ── Save both to HDFS ─────────────────────────────────────────────
+        # Save both to HDFS 
         self.save(
             normalized,
             output_path=output_path,
@@ -722,7 +721,7 @@ class S2ORCIngester(BaseIngester):
         return normalized
 
 
-# ── ID type detection helper ─────────────────────────────────────────────────
+# ID type detection helper 
 
 def _is_arxiv_id(pid: str) -> bool:
     """
@@ -738,7 +737,7 @@ def _is_arxiv_id(pid: str) -> bool:
     return bool(re.match(r"^\d{4}\.\d{4,6}(v\d+)?$", pid.strip()))
 
 
-# ── Convenience function for pipeline runner compatibility ────────────────────
+# Convenience function for pipeline runner compatibility 
 
 def enrich_papers(
     arxiv_ids: list[str],
@@ -795,7 +794,7 @@ def enrich_papers(
     all_papers: list[dict] = []
     all_edges:  list[dict] = []
 
-    # ── Resolve each ID to the correct S2ORC lookup format ───────────────
+    # Resolve each ID to the correct S2ORC lookup format 
     # arXiv IDs → prefix with 'ArXiv:' (e.g. 'ArXiv:2603.24594')
     # S2ORC IDs → pass through unchanged (e.g. '649def34f8be52c...')
     # This lets us enrich papers from both sources in one pass.
@@ -906,7 +905,7 @@ def enrich_papers(
     return papers_written, edges_written
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# CLI entry point 
 
 if __name__ == "__main__":
     import argparse
