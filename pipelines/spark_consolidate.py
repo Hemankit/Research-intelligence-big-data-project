@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 spark_consolidate.py — Spark Consolidation Job
-
+================================================
 Reads raw JSONL files from all three ingestion sources in HDFS
 (arXiv, S2ORC, OpenAlex), deduplicates and merges by paper_id,
 and writes the result as Parquet into the Hive `research_intel.papers` table.
@@ -49,7 +49,7 @@ HIVE_DB = "research_intel"
 HIVE_TABLE = "papers"
 
 # Schema for each source 
-# We read as JSON with permissive mode — fields not present become null.
+# We read as JSON with permissive mode: fields not present become null.
 
 UNIFIED_SCHEMA = StructType([
     StructField("paper_id",            StringType(), True),
@@ -266,9 +266,8 @@ def prepare_for_hive(df: DataFrame) -> DataFrame:
         F.lit(None).cast(FloatType()).alias("umap_x"),
         F.lit(None).cast(FloatType()).alias("umap_y"),
 
-        # PageRank placeholder (filled by GraphX job later)
-        F.lit(None).cast(FloatType()).alias("pagerank_score"),
-
+        # PageRank scores live in separate pagerank_scores table and are joined in Spark Trends, so no pagerank_score column here
+        
         # NER placeholders (filled by NER job later)
         F.lit(None).cast(ArrayType(StringType())).alias("methods"),
         F.lit(None).cast(ArrayType(StringType())).alias("datasets"),

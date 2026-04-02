@@ -28,3 +28,9 @@ python -m ingestion.Openalex --ids 2603.24594 2603.24587 2603.24580 2603.24567 2
 
 # Spark Consolidator
 MSYS_NO_PATHCONV=1 docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/work-dir/pipelines/spark_consolidate.py
+
+# Spark PageRank
+MSYS_NO_PATHCONV=1 docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/work-dir/pipelines/spark_pagerank.py
+
+# Spark Trend
+MSYS_NO_PATHCONV=1 docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark/work-dir/pipelines/spark_trends.py
