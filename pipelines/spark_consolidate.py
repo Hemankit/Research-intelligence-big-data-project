@@ -42,14 +42,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spark_consolidate")
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# Constants 
 
-HDFS_BASE = "hdfs://namenode:9000/user/research-intelligence/raw"
-HIVE_DB = "research_intel"
-HIVE_TABLE = "papers"
+HDFS_BASE        = "hdfs://namenode:9000/user/research-intelligence/raw"
+HIVE_DB          = "research_intel"
+HIVE_TABLE       = "papers"
+FULLTEXT_TABLE   = "paper_fulltext"
 
-# ── Schema for each source ────────────────────────────────────────────────────
-# We read as JSON with permissive mode — fields not present become null.
+# Schema for each source 
+# We read as JSON with permissive mode: fields not present become null.
 
 UNIFIED_SCHEMA = StructType([
     StructField("paper_id",            StringType(), True),
@@ -67,8 +68,25 @@ UNIFIED_SCHEMA = StructType([
     StructField("ingested_at",         StringType(), True),
 ])
 
+# Schema for the separate paper_fulltext table (Option B).
+# Kept narrow on purpose — only the fields needed for full-text workloads
+# (BERTopic, NER, search indexing). Metadata lives in the papers table
+# and is joined on paper_id when needed.
+FULLTEXT_SCHEMA = StructType([
+    StructField("paper_id",   StringType(), True),
+    StructField("full_text",  StringType(), True),
+    StructField("sections",   ArrayType(
+        StructType([
+            StructField("heading", StringType(), True),
+            StructField("text",    StringType(), True),
+        ])
+    ), True),
+    StructField("doi",        StringType(), True),
+    StructField("ingested_at", StringType(), True),
+])
 
-# ── Helper: read + normalize each source ──────────────────────────────────────
+
+# Helper: read + normalize each source 
 
 def read_arxiv(spark: SparkSession) -> DataFrame:
     """Read arXiv JSONL and normalize to unified schema."""
@@ -102,10 +120,14 @@ def read_arxiv(spark: SparkSession) -> DataFrame:
 
 
 def read_s2orc(spark: SparkSession) -> DataFrame:
-    """Read S2ORC JSONL (paper records, not edges) and normalize."""
-    # S2ORC papers are under raw/s2orc/{category}/ but NOT raw/s2orc/edges/
-    path = f"{HDFS_BASE}/s2orc/*/*/*"
-    logger.info("Reading S2ORC data from: %s", path)
+    """Read S2ORC JSONL (paper records, not edges) and normalize.
+
+    Reads only from s2orc_bulk/ — explicitly excludes s2orc_fulltext/
+    (handled separately by consolidate_fulltext) and edges/ (handled by
+    consolidate_edges) to avoid schema mismatches.
+    """
+    path = f"{HDFS_BASE}/s2orc/s2orc_bulk/*/*"
+    logger.info("Reading S2ORC metadata from: %s", path)
 
     try:
         df = spark.read.json(path)
@@ -172,7 +194,7 @@ def read_openalex(spark: SparkSession) -> DataFrame:
     )
 
 
-# ── Merge logic ───────────────────────────────────────────────────────────────
+# Merge logic 
 
 def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFrame) -> DataFrame:
     """
@@ -237,7 +259,7 @@ def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFra
     return merged
 
 
-# ── Add Hive-compatible columns ───────────────────────────────────────────────
+# Add Hive-compatible columns 
 
 def prepare_for_hive(df: DataFrame) -> DataFrame:
     """
@@ -266,9 +288,8 @@ def prepare_for_hive(df: DataFrame) -> DataFrame:
         F.lit(None).cast(FloatType()).alias("umap_x"),
         F.lit(None).cast(FloatType()).alias("umap_y"),
 
-        # PageRank placeholder (filled by GraphX job later)
-        F.lit(None).cast(FloatType()).alias("pagerank_score"),
-
+        # PageRank scores live in separate pagerank_scores table and are joined in Spark Trends, so no pagerank_score column here
+        
         # NER placeholders (filled by NER job later)
         F.lit(None).cast(ArrayType(StringType())).alias("methods"),
         F.lit(None).cast(ArrayType(StringType())).alias("datasets"),
@@ -286,7 +307,7 @@ def prepare_for_hive(df: DataFrame) -> DataFrame:
     )
 
 
-# ── Write to Hive ─────────────────────────────────────────────────────────────
+# Write to Hive 
 
 def write_to_hive(df: DataFrame) -> None:
     """
@@ -309,7 +330,7 @@ def write_to_hive(df: DataFrame) -> None:
     logger.info("Successfully wrote to %s", table)
 
 
-# ── Citation edges → Hive ─────────────────────────────────────────────────────
+# Citation edges → Hive 
 
 def consolidate_edges(spark: SparkSession) -> None:
     """
@@ -349,7 +370,107 @@ def consolidate_edges(spark: SparkSession) -> None:
     logger.info("Successfully wrote citation edges to %s", table)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Full-text table (Option B — separate from papers table) 
+
+def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
+    """
+    Read S2ORC full-text JSONL records from s2orc_fulltext/ into a DataFrame
+    matching FULLTEXT_SCHEMA.
+
+    Records here were produced by s2orc_bulk_download.py chaining into
+    S2ORCIngester corpus mode. Each record has full_text (the complete paper
+    body) and sections (list of {heading, text} dicts).
+
+    Authors, title, abstract, and citation counts are intentionally NOT
+    read here — they live in the papers table and should be joined on
+    paper_id rather than duplicated.
+    """
+    path = f"{HDFS_BASE}/s2orc/s2orc_fulltext/*/*"
+    logger.info("Reading S2ORC full-text records from: %s", path)
+
+    try:
+        df = spark.read.json(path)
+    except Exception as e:
+        logger.warning("No S2ORC full-text data found or read error: %s", e)
+        return spark.createDataFrame([], FULLTEXT_SCHEMA)
+
+    if df.rdd.isEmpty():
+        logger.info("S2ORC full-text path is empty — skipping.")
+        return spark.createDataFrame([], FULLTEXT_SCHEMA)
+
+    # Only keep records that actually have full_text content
+    if "full_text" in df.columns:
+        df = df.filter(
+            F.col("full_text").isNotNull() & (F.col("full_text") != "")
+        )
+
+    # Build the select — handle optional columns defensively so the job
+    # doesn't crash if a field is missing from older records.
+    select_exprs = [F.col("paper_id")]
+
+    select_exprs.append(
+        F.col("full_text") if "full_text" in df.columns
+        else F.lit(None).cast(StringType()).alias("full_text")
+    )
+    select_exprs.append(
+        F.col("sections") if "sections" in df.columns
+        else F.lit(None).cast(FULLTEXT_SCHEMA["sections"].dataType).alias("sections")
+    )
+    select_exprs.append(
+        F.col("doi") if "doi" in df.columns
+        else F.lit(None).cast(StringType()).alias("doi")
+    )
+    select_exprs.append(F.col("ingested_at"))
+
+    return df.select(*select_exprs)
+
+
+def consolidate_fulltext(spark: SparkSession) -> None:
+    """
+    Read S2ORC full-text records and write to the Hive paper_fulltext table.
+
+    The paper_fulltext table is separate from papers (Option B) so that:
+      - Metadata queries against papers stay fast (no giant text columns)
+      - BERTopic, NER, and search indexing jobs can query just this table
+      - spark_consolidate --skip-fulltext lets you run the metadata pipeline
+        independently without waiting for full-text data
+
+    Deduplicates on paper_id, keeping the record with the longest full_text
+    (in case a paper was ingested from multiple shards).
+    """
+    df = read_s2orc_fulltext(spark)
+
+    if df.rdd.isEmpty():
+        logger.info("No full-text records to consolidate — skipping.")
+        return
+
+    # Deduplicate: if a paper appears in multiple shards, keep the longest
+    # full_text (most complete parse). Use a window function to rank by length.
+    from pyspark.sql.window import Window
+    w = Window.partitionBy("paper_id").orderBy(
+        F.length(F.col("full_text")).desc()
+    )
+    df_deduped = (
+        df.filter(F.col("paper_id").isNotNull() & (F.col("paper_id") != ""))
+          .withColumn("_rank", F.row_number().over(w))
+          .filter(F.col("_rank") == 1)
+          .drop("_rank")
+    )
+
+    table = f"{HIVE_DB}.{FULLTEXT_TABLE}"
+    count = df_deduped.count()
+    logger.info("Writing %d full-text records to Hive table: %s", count, table)
+
+    df_deduped.write \
+        .mode("overwrite") \
+        .format("parquet") \
+        .option("compression", "snappy") \
+        .saveAsTable(table)
+
+    logger.info("Successfully wrote %d records to %s", count, table)
+
+
+# Main 
 
 def main():
     parser = argparse.ArgumentParser(description="Spark consolidation job")
@@ -360,6 +481,10 @@ def main():
     parser.add_argument(
         "--skip-edges", action="store_true",
         help="Skip citation edge consolidation",
+    )
+    parser.add_argument(
+        "--skip-fulltext", action="store_true",
+        help="Skip full-text consolidation into paper_fulltext table",
     )
     args = parser.parse_args()
 
@@ -403,6 +528,10 @@ def main():
         # 5. Consolidate citation edges
         if not args.skip_edges:
             consolidate_edges(spark)
+
+        # 6. Consolidate full-text into separate paper_fulltext table (Option B)
+        if not args.skip_fulltext:
+            consolidate_fulltext(spark)
 
         logger.info("=" * 60)
         logger.info("Consolidation complete!")

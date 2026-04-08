@@ -51,7 +51,7 @@ class HDFSClient:
         self.base_path = base_path
         self.base_url = f"http://{self.host}:{self.port}/webhdfs/v1"
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    # Internal helpers 
 
     def _url(self, hdfs_path: str) -> str:
         """Build a full WebHDFS URL for a given HDFS path."""
@@ -77,8 +77,7 @@ class HDFSClient:
         resp = requests.put(url)
         resp.raise_for_status()
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
+    # Public API 
     def write_json(self, records: list[dict], source: str, category: str = "general") -> str:
         """
         Serialize a list of records to a single newline-delimited JSON file

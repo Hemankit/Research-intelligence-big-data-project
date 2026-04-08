@@ -118,7 +118,7 @@ class S2ORCIngester(BaseIngester):
             ),
         )
 
-    # ── connect ───────────────────────────────────────────────────────────────
+    # connect 
 
     def connect(self) -> None:
         """Validate access to S2ORC (local corpus or API)."""
@@ -159,7 +159,7 @@ class S2ORCIngester(BaseIngester):
                 f"Unexpected error during S2ORC connection: {e}"
             ) from e
 
-    # ── fetch ─────────────────────────────────────────────────────────────────
+    # fetch 
 
     def fetch(self, query: str, **kwargs) -> list[dict]:
         """
@@ -197,7 +197,7 @@ class S2ORCIngester(BaseIngester):
         mode = self.config.get("mode")
 
         if mode == "corpus":
-            return self._fetch_from_shard(query, batch_size)
+            return self._fetch_from_shard(query, batch_size, max_records=max_records)
         elif mode == "api":
             return self._fetch_from_api(
                 query, batch_size, offset, fields, max_records=max_records
@@ -207,8 +207,21 @@ class S2ORCIngester(BaseIngester):
                 f"Unknown mode '{mode}'. Expected 'corpus' or 'api'."
             )
 
-    def _fetch_from_shard(self, shard_path: str, batch_size: int) -> list[dict]:
-        """Read a shard file (JSONL or gzipped JSONL) line by line."""
+    def _fetch_from_shard(
+        self,
+        shard_path: str,
+        batch_size: int,
+        max_records: int = None,
+    ) -> list[dict]:
+        """
+        Read a shard file (JSONL or gzipped JSONL) line by line.
+
+        Streams the file and yields up to `max_records` records total.
+        Previously this capped at `batch_size` which silently dropped
+        99%+ of a bulk S2ORC shard (which contains hundreds of thousands
+        of papers per file). `batch_size` is now only a logging cadence;
+        the total cap is controlled by `max_records` (None = read all).
+        """
         path = Path(shard_path)
         if not path.exists():
             raise FetchError(f"Shard file not found: {shard_path}")
@@ -216,22 +229,42 @@ class S2ORCIngester(BaseIngester):
         records = []
         try:
             opener = (
-                gzip.open(path, "rt") if path.suffix == ".gz"
-                else open(path, "r")
+                gzip.open(path, "rt", encoding="utf-8")
+                if path.suffix == ".gz"
+                else open(path, "r", encoding="utf-8")
             )
             with opener as f:
-                for line in f:
+                for i, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
-                    records.append(json.loads(line))
-                    if len(records) >= batch_size:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "Skipping malformed JSON at line %d in %s: %s",
+                            i, path.name, e,
+                        )
+                        continue
+
+                    if max_records is not None and len(records) >= max_records:
+                        logger.info(
+                            "Reached max_records=%d, stopping shard read",
+                            max_records,
+                        )
                         break
-        except (OSError, json.JSONDecodeError) as e:
+
+                    if len(records) % batch_size == 0:
+                        logger.info(
+                            "  ...read %d records from %s",
+                            len(records), path.name,
+                        )
+        except OSError as e:
             raise FetchError(
                 f"Failed to read shard '{shard_path}': {e}"
             ) from e
 
+        logger.info("Loaded %d records from shard %s", len(records), path.name)
         return records
 
     def _fetch_from_api(
@@ -402,35 +435,46 @@ class S2ORCIngester(BaseIngester):
             )
             return ""
 
-    # ── normalize ─────────────────────────────────────────────────────────────
+    # normalize 
 
     def normalize(self, raw_record: dict) -> dict:
         """
         Map a raw S2ORC record to the unified paper schema.
 
+        Handles two input shapes:
+          1. Graph API records (from _fetch_from_api)  — flat fields
+             like raw_record['title'], raw_record['abstract'], etc.
+          2. Bulk Datasets API records (from _fetch_from_shard on
+             official S2ORC bulk shards) — nested under `content`,
+             with fields encoded as character offsets into `content.text`
+             via `content.annotations`.
+
+        The bulk format is auto-detected by the presence of a `content`
+        dict with an `annotations` sub-dict. Bulk records additionally
+        carry a `full_text` field containing the parsed paper body and
+        a `sections` field listing section headings with their text.
+
         Uses arXiv ID from externalIds as paper_id so records join correctly
         with arXiv records in Spark. Falls back to S2ORC's internal corpusId
         or paperId only when no arXiv ID is available.
-
-        Parameters
-        ----------
-        raw_record : dict
-            A single raw record from fetch().
-
-        Returns
-        -------
-        dict
-            Normalized record matching the pipeline schema.
-
-        Raises
-        ------
-        NormalizationError
-            If required fields are missing or normalization fails.
         """
+        # Detect bulk dataset format and reshape it to look like Graph API
+        # shape before running the rest of the normalization logic.
+        is_bulk = (
+            isinstance(raw_record.get("content"), dict)
+            and isinstance(raw_record["content"].get("annotations"), dict)
+        )
+
+        bulk_full_text = ""
+        bulk_sections: list[dict] = []
+
+        if is_bulk:
+            raw_record, bulk_full_text, bulk_sections = (
+                self._reshape_bulk_record(raw_record)
+            )
+
         try:
-            # ── paper_id: prefer arXiv ID for Spark join compatibility ────
-            # Using arXiv ID ensures S2ORC records join with arXiv records
-            # on paper_id without any key translation step.
+            # paper_id: prefer arXiv ID for Spark join compatibility
             external_ids = raw_record.get("externalIds") or {}
             arxiv_id     = (
                 external_ids.get("ArXiv") or external_ids.get("arxiv")
@@ -450,13 +494,13 @@ class S2ORCIngester(BaseIngester):
             if arxiv_id and "v" in str(arxiv_id):
                 paper_id = str(arxiv_id).split("v")[0]
 
-            # ── title ────────────────────────────────────────────────────
+            # title
             title = (raw_record.get("title") or "").strip()
 
-            # ── abstract ─────────────────────────────────────────────────
+            # abstract
             abstract = (raw_record.get("abstract") or "").strip()
 
-            # ── authors ──────────────────────────────────────────────────
+            # authors
             raw_authors = raw_record.get("authors") or []
             authors = [
                 a["name"]
@@ -464,14 +508,14 @@ class S2ORCIngester(BaseIngester):
                 if isinstance(a, dict) and a.get("name")
             ]
 
-            # ── date ─────────────────────────────────────────────────────
+            # date
             date = (
                 raw_record.get("publicationDate")
                 or str(raw_record.get("year", ""))
                 or None
             )
 
-            # ── venue / categories ────────────────────────────────────────
+            # venue / categories
             raw_venue = (
                 raw_record.get("venue")
                 or raw_record.get("publicationVenue")
@@ -490,7 +534,7 @@ class S2ORCIngester(BaseIngester):
                     categories.append(f)
             categories = [c for c in categories if c]
 
-            # ── additional S2ORC-specific fields ──────────────────────────
+            # additional S2ORC-specific fields
             citation_count  = raw_record.get("citationCount", 0)
             reference_count = raw_record.get("referenceCount", 0)
             is_open_access  = raw_record.get("isOpenAccess", False)
@@ -500,9 +544,11 @@ class S2ORCIngester(BaseIngester):
             s2_paper_id     = raw_record.get("paperId", "")
             doi             = external_ids.get("DOI", "")
 
-            # ── full_text (optional) ──────────────────────────────────────
-            # Only present if enable_full_text_download=True was set
-            full_text = raw_record.get("full_text", "")
+            # full_text (two sources):
+            #   1. Bulk dataset: extracted above into bulk_full_text
+            #   2. Graph API + enable_full_text_download: carried as
+            #      raw_record['full_text'] by _fetch_full_paper_content()
+            full_text = bulk_full_text or raw_record.get("full_text", "")
 
         except NormalizationError:
             raise
@@ -529,14 +575,260 @@ class S2ORCIngester(BaseIngester):
             "ingested_at":     datetime.now(timezone.utc).isoformat(),
         }
 
-        # Include full_text only if it was actually downloaded
+        # Carry full_text and sections through only if present.
+        # Downstream Spark jobs should treat both as optional nullable
+        # columns so metadata-only records still consolidate correctly.
         if full_text:
             normalized["full_text"] = full_text
+        if bulk_sections:
+            normalized["sections"] = bulk_sections
 
         return normalized
 
-    # ── extract_citation_edges ────────────────────────────────────────────────
+    # Bulk dataset reshape helper
 
+    @staticmethod
+    def _slice_annotation(text: str, annotation_json: str) -> str:
+        """
+        Given a `content.text` string and one of its annotation values
+        (which is a JSON-encoded list of {start, end} offset dicts),
+        return the concatenated substring.
+
+        The S2ORC bulk format encodes fields like title, abstract, author
+        names, paragraphs, and section headings as character offset ranges
+        into `content.text` rather than as inline strings. We slice them
+        back out using those offsets.
+        """
+        if not annotation_json or not text:
+            return ""
+        try:
+            spans = json.loads(annotation_json)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if not isinstance(spans, list):
+            return ""
+
+        parts = []
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            # S2ORC bulk shards encode start/end as STRINGS, not ints —
+            # coerce defensively so we accept either shape.
+            try:
+                start = int(span.get("start"))
+                end = int(span.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= start < end <= len(text):
+                parts.append(text[start:end])
+        return " ".join(parts).strip()
+
+    def _reshape_bulk_record(
+        self, raw_record: dict
+    ) -> tuple[dict, str, list[dict]]:
+        """
+        Convert a bulk S2ORC dataset record into a shape the rest of
+        normalize() can consume.
+
+        Bulk records look like:
+            {
+                "corpusid": 12345,
+                "externalids": {"ArXiv": "2401.12345", "DOI": "..."},
+                "content": {
+                    "text": "<full body>",
+                    "annotations": {
+                        "title": "[{\"start\":0,\"end\":42}]",
+                        "abstract": "[{\"start\":43,\"end\":900}]",
+                        "author": "[...]",
+                        "paragraph": "[...]",
+                        "section_header": "[...]",
+                        ...
+                    },
+                    "source": {...}
+                }
+            }
+
+        Returns
+        -------
+        reshaped   : dict in Graph API shape (flat title/abstract/authors
+                     keys that normalize() already knows how to handle)
+        full_text  : the content.text body, for the `full_text` column
+        sections   : list of {heading, text} for each section header, for
+                     the `sections` column
+        """
+        content = raw_record.get("content") or {}
+        text = content.get("text") or ""
+        annotations = content.get("annotations") or {}
+
+        # Slice title / abstract out via their offsets
+        title = self._slice_annotation(text, annotations.get("title"))
+        abstract = self._slice_annotation(text, annotations.get("abstract"))
+
+        # Authors: reconstruct full names by pairing authorfirstname +
+        # authorlastname spans. The 'author' annotation spans are too short
+        # (they point to 5-6 char abbreviations in content.text, not real
+        # names). First/last name annotations give us the actual name parts.
+        #
+        # Strategy:
+        #   1. Parse authorfirstname spans → list of (start, first_name)
+        #   2. Parse authorlastname spans  → list of (start, last_name)
+        #   3. Sort both by start offset; pair them positionally (i-th first
+        #      with i-th last). This matches how S2ORC lays out names in the
+        #      text — first and last for the same author appear close together
+        #      and in the same order.
+        #   4. Fall back to 'author' spans only if both name lists are empty.
+        authors: list[dict] = []
+
+        def _parse_name_spans(ann_json) -> list[tuple[int, str]]:
+            """Return list of (start_offset, name_string) from an annotation."""
+            if not ann_json:
+                return []
+            try:
+                spans = json.loads(ann_json) if isinstance(ann_json, str) else ann_json
+            except (json.JSONDecodeError, TypeError):
+                return []
+            result = []
+            for span in spans:
+                if not isinstance(span, dict):
+                    continue
+                try:
+                    s = int(span.get("start"))
+                    e = int(span.get("end"))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= s < e <= len(text):
+                    name_part = text[s:e].strip()
+                    if name_part:
+                        result.append((s, name_part))
+            return sorted(result, key=lambda x: x[0])
+
+        first_names = _parse_name_spans(annotations.get("authorfirstname"))
+        last_names  = _parse_name_spans(annotations.get("authorlastname"))
+
+        if first_names or last_names:
+            # Pair by position — zip stops at the shorter list, which is fine
+            # for authors that have both parts. Unpaired entries (e.g. single-
+            # name authors) are appended from whichever list is longer.
+            paired = []
+            for (_, fn), (_, ln) in zip(first_names, last_names):
+                paired.append({"name": f"{fn} {ln}".strip()})
+            # Append any extras from the longer list
+            for _, name_part in first_names[len(paired):]:
+                paired.append({"name": name_part})
+            for _, name_part in last_names[len(paired):]:
+                paired.append({"name": name_part})
+            authors = paired
+        else:
+            # Fallback: use 'author' spans directly (some records may not have
+            # separate first/last annotations)
+            author_json = annotations.get("author")
+            if author_json:
+                try:
+                    spans = json.loads(author_json)
+                    for span in spans:
+                        if not isinstance(span, dict):
+                            continue
+                        try:
+                            s = int(span.get("start"))
+                            e = int(span.get("end"))
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= s < e <= len(text):
+                            name = text[s:e].strip()
+                            if name:
+                                authors.append({"name": name})
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # Build section list: pair each section header with the text
+        # between it and the next section header.
+        # Note: S2ORC bulk uses 'sectionheader' (no underscore) — we
+        # check both spellings for forward compatibility.
+        sections: list[dict] = []
+        sec_json = (
+            annotations.get("sectionheader")
+            or annotations.get("section_header")
+            or "[]"
+        )
+        try:
+            header_spans_raw = json.loads(sec_json)
+            if isinstance(header_spans_raw, list):
+                # Coerce string offsets to ints, drop anything malformed
+                header_spans = []
+                for s in header_spans_raw:
+                    if not isinstance(s, dict):
+                        continue
+                    try:
+                        h_start = int(s.get("start"))
+                        h_end = int(s.get("end"))
+                    except (TypeError, ValueError):
+                        continue
+                    header_spans.append({"start": h_start, "end": h_end})
+
+                # Sort headers by start offset, then pair each with
+                # everything up to the next header's start.
+                header_spans.sort(key=lambda s: s["start"])
+                for i, span in enumerate(header_spans):
+                    h_start = span["start"]
+                    h_end = span["end"]
+                    if not (0 <= h_start < h_end <= len(text)):
+                        continue
+                    heading = text[h_start:h_end].strip()
+                    body_start = h_end
+                    body_end = (
+                        header_spans[i + 1]["start"]
+                        if i + 1 < len(header_spans)
+                        else len(text)
+                    )
+                    body = text[body_start:body_end].strip()
+                    if heading or body:
+                        sections.append({"heading": heading, "text": body})
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Normalize externalids keys (bulk uses lowercase, Graph API uses
+        # PascalCase). Reshape so downstream paper_id logic works.
+        ext_ids_raw = raw_record.get("externalids") or {}
+        external_ids = {}
+        for k, v in ext_ids_raw.items():
+            if not v:
+                continue
+            # Map common lowercase keys to the PascalCase normalize() expects
+            if k.lower() == "arxiv":
+                external_ids["ArXiv"] = v
+            elif k.lower() == "doi":
+                external_ids["DOI"] = v
+            else:
+                external_ids[k] = v
+
+        # Publication date: bulk shards sometimes include it at top level
+        pub_date = (
+            raw_record.get("publicationdate")
+            or raw_record.get("publicationDate")
+            or None
+        )
+        year = raw_record.get("year")
+
+        reshaped = {
+            "paperId":         raw_record.get("corpusid") or raw_record.get("paperId"),
+            "corpusid":        raw_record.get("corpusid"),
+            "externalIds":     external_ids,
+            "title":           title,
+            "abstract":        abstract,
+            "authors":         authors,
+            "publicationDate": pub_date,
+            "year":            year,
+            "venue":           raw_record.get("venue") or "",
+            "fieldsOfStudy":   raw_record.get("fieldsofstudy") or [],
+            "citationCount":   raw_record.get("citationcount", 0),
+            "referenceCount":  raw_record.get("referencecount", 0),
+            "isOpenAccess":    True,  # S2ORC bulk = open access corpus
+            "openAccessPdf":   {"url": ""},
+        }
+
+        return reshaped, text, sections
+
+    # extract_citation_edges 
     def extract_citation_edges(self, raw_record: dict) -> list[dict]:
         """
         Extract citation edges from a single RAW S2ORC record.
@@ -599,7 +891,7 @@ class S2ORCIngester(BaseIngester):
 
         return edges
 
-    # ── save ─────────────────────────────────────────────────────────────────
+    # save 
 
     def save(
         self,
@@ -650,7 +942,7 @@ class S2ORCIngester(BaseIngester):
                 f"Failed to save S2ORC records to HDFS: {e}"
             ) from e
 
-    # ── run (override) ────────────────────────────────────────────────────────
+    # run (override) 
 
     def run(
         self,
@@ -690,7 +982,7 @@ class S2ORCIngester(BaseIngester):
         raw_records = self.fetch(query, **kwargs)
         logger.info("Fetched %d raw S2ORC records", len(raw_records))
 
-        # ── Extract edges from RAW records BEFORE normalization ───────────
+        # Extract edges from RAW records BEFORE normalization
         # Critical: base class normalizes first which strips
         # references/citations fields making edge extraction impossible.
         all_edges: list[dict] = []
@@ -698,7 +990,7 @@ class S2ORCIngester(BaseIngester):
             all_edges.extend(self.extract_citation_edges(raw))
         logger.info("Extracted %d citation edges", len(all_edges))
 
-        # ── Normalize ─────────────────────────────────────────────────────
+        # Normalize 
         normalized: list[dict] = []
         for raw in raw_records:
             try:
@@ -710,7 +1002,7 @@ class S2ORCIngester(BaseIngester):
 
         logger.info("Normalized %d records", len(normalized))
 
-        # ── Save both to HDFS ─────────────────────────────────────────────
+        # Save both to HDFS 
         self.save(
             normalized,
             output_path=output_path,
@@ -722,7 +1014,7 @@ class S2ORCIngester(BaseIngester):
         return normalized
 
 
-# ── ID type detection helper ─────────────────────────────────────────────────
+# ID type detection helper 
 
 def _is_arxiv_id(pid: str) -> bool:
     """
@@ -738,7 +1030,7 @@ def _is_arxiv_id(pid: str) -> bool:
     return bool(re.match(r"^\d{4}\.\d{4,6}(v\d+)?$", pid.strip()))
 
 
-# ── Convenience function for pipeline runner compatibility ────────────────────
+# Convenience function for pipeline runner compatibility 
 
 def enrich_papers(
     arxiv_ids: list[str],
@@ -795,7 +1087,7 @@ def enrich_papers(
     all_papers: list[dict] = []
     all_edges:  list[dict] = []
 
-    # ── Resolve each ID to the correct S2ORC lookup format ───────────────
+    # Resolve each ID to the correct S2ORC lookup format 
     # arXiv IDs → prefix with 'ArXiv:' (e.g. 'ArXiv:2603.24594')
     # S2ORC IDs → pass through unchanged (e.g. '649def34f8be52c...')
     # This lets us enrich papers from both sources in one pass.
@@ -906,7 +1198,7 @@ def enrich_papers(
     return papers_written, edges_written
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# CLI entry point 
 
 if __name__ == "__main__":
     import argparse
