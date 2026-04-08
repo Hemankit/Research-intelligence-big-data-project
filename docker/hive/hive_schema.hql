@@ -1,7 +1,5 @@
 -- ============================================================================
 -- Research Intelligence Pipeline — Hive Schema DDL
--- CS585/DS504 Spring 2026, WPI
--- ============================================================================
 -- Run via:  beeline -u jdbc:hive2://localhost:10000 -f hive_schema.hql
 -- Or from Python:  cursor.execute(open('hive_schema.hql').read())
 -- ============================================================================
@@ -36,7 +34,9 @@ CREATE TABLE IF NOT EXISTS papers (
     umap_y              FLOAT       COMMENT 'UMAP 2D y-coordinate for landscape map',
 
     -- GraphX output
-    pagerank_score      FLOAT       COMMENT 'PageRank from citation graph',
+    -- NOTE: pagerank_score is NOT stored here — it lives in the separate
+    -- pagerank_scores table (written by spark_pagerank.py) and is joined
+    -- in at query time. spark_consolidate.py does not write this column.
 
     -- NER outputs (populated on-demand or batch)
     methods             ARRAY<STRING> COMMENT 'Extracted method entities',
@@ -88,10 +88,39 @@ TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 4. paper_fulltext — parsed full-text bodies from S2ORC bulk corpus
+--    Populated by: spark_consolidate.py consolidate_fulltext()
+--                  (reads from HDFS raw/s2orc/s2orc_fulltext/)
+--    Queried by:   BERTopic job, NER pipeline, Elasticsearch indexer
+--    NOTE: Kept separate from papers (Option B) so metadata queries stay
+--    fast. Join on paper_id when full text is needed.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS paper_fulltext (
+    paper_id            STRING      COMMENT 'arXiv ID or S2ORC corpusid — joins to papers.paper_id',
+    full_text           STRING      COMMENT 'Complete parsed paper body (~45K chars avg)',
+    sections            ARRAY<STRUCT<
+                            heading: STRING,
+                            text:    STRING
+                        >>          COMMENT 'Section list with headings and body text',
+    doi                 STRING      COMMENT 'DOI if available',
+    ingested_at         STRING      COMMENT 'When this record was ingested from the bulk shard'
+)
+COMMENT 'Full-text paper bodies from S2ORC bulk corpus — separate from papers table for performance'
+STORED AS PARQUET
+TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
+
+
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- Verification queries (run after loading data to sanity-check)
 -- ────────────────────────────────────────────────────────────────────────────
 -- SHOW TABLES;
 -- DESCRIBE FORMATTED papers;
+-- DESCRIBE FORMATTED paper_fulltext;
 -- SELECT COUNT(*) FROM papers;
+-- SELECT COUNT(*) FROM paper_fulltext;
 -- SELECT COUNT(*) FROM citation_edges;
 -- SELECT primary_category, year_month, SUM(paper_count) FROM trends GROUP BY primary_category, year_month LIMIT 20;
+-- Example join — papers metadata + full text:
+-- SELECT p.paper_id, p.title, LENGTH(f.full_text) AS chars, SIZE(f.sections) AS num_sections
+-- FROM papers p JOIN paper_fulltext f ON p.paper_id = f.paper_id LIMIT 10;

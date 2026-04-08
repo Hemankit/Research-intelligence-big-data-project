@@ -664,26 +664,81 @@ class S2ORCIngester(BaseIngester):
         title = self._slice_annotation(text, annotations.get("title"))
         abstract = self._slice_annotation(text, annotations.get("abstract"))
 
-        # Authors: each span is one author name substring
+        # Authors: reconstruct full names by pairing authorfirstname +
+        # authorlastname spans. The 'author' annotation spans are too short
+        # (they point to 5-6 char abbreviations in content.text, not real
+        # names). First/last name annotations give us the actual name parts.
+        #
+        # Strategy:
+        #   1. Parse authorfirstname spans → list of (start, first_name)
+        #   2. Parse authorlastname spans  → list of (start, last_name)
+        #   3. Sort both by start offset; pair them positionally (i-th first
+        #      with i-th last). This matches how S2ORC lays out names in the
+        #      text — first and last for the same author appear close together
+        #      and in the same order.
+        #   4. Fall back to 'author' spans only if both name lists are empty.
         authors: list[dict] = []
-        author_json = annotations.get("author")
-        if author_json:
+
+        def _parse_name_spans(ann_json) -> list[tuple[int, str]]:
+            """Return list of (start_offset, name_string) from an annotation."""
+            if not ann_json:
+                return []
             try:
-                spans = json.loads(author_json)
-                for span in spans:
-                    if not isinstance(span, dict):
-                        continue
-                    try:
-                        s = int(span.get("start"))
-                        e = int(span.get("end"))
-                    except (TypeError, ValueError):
-                        continue
-                    if 0 <= s < e <= len(text):
-                        name = text[s:e].strip()
-                        if name:
-                            authors.append({"name": name})
+                spans = json.loads(ann_json) if isinstance(ann_json, str) else ann_json
             except (json.JSONDecodeError, TypeError):
-                pass
+                return []
+            result = []
+            for span in spans:
+                if not isinstance(span, dict):
+                    continue
+                try:
+                    s = int(span.get("start"))
+                    e = int(span.get("end"))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= s < e <= len(text):
+                    name_part = text[s:e].strip()
+                    if name_part:
+                        result.append((s, name_part))
+            return sorted(result, key=lambda x: x[0])
+
+        first_names = _parse_name_spans(annotations.get("authorfirstname"))
+        last_names  = _parse_name_spans(annotations.get("authorlastname"))
+
+        if first_names or last_names:
+            # Pair by position — zip stops at the shorter list, which is fine
+            # for authors that have both parts. Unpaired entries (e.g. single-
+            # name authors) are appended from whichever list is longer.
+            paired = []
+            for (_, fn), (_, ln) in zip(first_names, last_names):
+                paired.append({"name": f"{fn} {ln}".strip()})
+            # Append any extras from the longer list
+            for _, name_part in first_names[len(paired):]:
+                paired.append({"name": name_part})
+            for _, name_part in last_names[len(paired):]:
+                paired.append({"name": name_part})
+            authors = paired
+        else:
+            # Fallback: use 'author' spans directly (some records may not have
+            # separate first/last annotations)
+            author_json = annotations.get("author")
+            if author_json:
+                try:
+                    spans = json.loads(author_json)
+                    for span in spans:
+                        if not isinstance(span, dict):
+                            continue
+                        try:
+                            s = int(span.get("start"))
+                            e = int(span.get("end"))
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= s < e <= len(text):
+                            name = text[s:e].strip()
+                            if name:
+                                authors.append({"name": name})
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         # Build section list: pair each section header with the text
         # between it and the next section header.
