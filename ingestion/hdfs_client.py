@@ -183,3 +183,32 @@ class HDFSClient:
                         hdfs_path, e
                     )
         return records
+
+    def list_directory(self, hdfs_path: str) -> list[str]:
+        """
+        List all files and subdirectories in an HDFS directory.
+
+        Uses the WebHDFS LISTSTATUS operation to retrieve directory contents.
+        Returns only the names (not full paths) of files and subdirectories.
+
+        Parameters
+        ----------
+        hdfs_path : str
+            HDFS directory path to list.
+
+        Returns
+        -------
+        list[str]
+            List of file and directory names in the specified path.
+            Returns empty list if the directory does not exist or is empty.
+        """
+        url = self._url(hdfs_path) + "&op=LISTSTATUS"
+        resp = requests.get(url)
+
+        if resp.status_code != 200:
+            logger.warning("Directory does not exist or cannot be listed: %s", hdfs_path)
+            return []
+
+        data = resp.json()
+        file_statuses = data.get("FileStatuses", {}).get("FileStatus", [])
+        return [f["pathSuffix"] for f in file_statuses]
