@@ -20,31 +20,26 @@ private methods and registering the name in save().
 Dependencies: json (stdlib), os (stdlib), pathlib (stdlib)
 """
 
+"""
+outputs.py — persists BERTopic results to local disk or HDFS.
+"""
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+
+from ingestion.hdfs_client import HDFSClient
+
+logger = logging.getLogger(__name__)
 
 
 class TopicModelOutputs:
-    """
-    Persists topic modeling results to a configurable storage backend.
-
-    Separates the three output types (assignments, metadata, coordinates)
-    into distinct files for clean downstream consumption by Spark and
-    the dashboard API.
-
-    Parameters
-    ----------
-    output_path : str
-        Base path where output files will be written. For local backend,
-        this is a filesystem directory. For HDFS backend, an HDFS path.
-    backend : str
-        Storage backend to use. Currently supported: 'local'.
-        Planned: 'hdfs', 'elasticsearch'. Default: 'local'.
-    """
-
     def __init__(self, output_path: str, backend: str = "local"):
-        pass
+        self.output_path = output_path
+        self.backend = backend
+        if backend not in ("local", "hdfs"):
+            raise ValueError(f"Unknown backend '{backend}'. Use 'local' or 'hdfs'.")
 
     def save(
         self,
@@ -53,138 +48,56 @@ class TopicModelOutputs:
         coordinates: list[dict],
         run_id: str = None,
     ) -> dict:
-        """
-        Write all three output types to the configured storage backend.
-
-        Primary entry point called by run.py after the topic model has
-        been fitted. Delegates to backend-specific private methods for
-        each output type. Returns the paths where outputs were written
-        for logging and downstream reference.
-
-        Parameters
-        ----------
-        assignments : list[dict]
-            Per-paper topic assignments as returned by
-            TopicModeler.get_topic_assignments().
-        topic_info : list[dict]
-            Per-topic metadata as returned by
-            TopicModeler.get_topic_info().
-        coordinates : list[dict]
-            Per-paper 2D coordinates as returned by
-            TopicModeler.get_2d_coordinates().
-        run_id : str, optional
-            Identifier for this pipeline run used to namespace output
-            files (e.g., a timestamp or experiment name). If None,
-            a timestamp is generated automatically.
-
-        Returns
-        -------
-        dict
-            Paths where each output type was written:
-            - assignments_path (str)
-            - topic_info_path (str)
-            - coordinates_path (str)
-        """
-        pass
+        run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        save_fn = self._save_local if self.backend == "local" else self._save_hdfs
+        paths = {
+            "assignments_path": save_fn(assignments, f"{run_id}/assignments.jsonl"),
+            "topic_info_path":  save_fn(topic_info,  f"{run_id}/topic_info.jsonl"),
+            "coordinates_path": save_fn(coordinates, f"{run_id}/coordinates.jsonl"),
+        }
+        logger.info("BERTopic outputs saved for run_id=%s: %s", run_id, paths)
+        return paths
 
     def _save_local(self, records: list[dict], filename: str) -> str:
-        """
-        Write a list of records as a JSONL file to the local filesystem.
-
-        Creates parent directories if they do not exist. Writes one
-        JSON object per line for compatibility with Spark's JSON reader.
-
-        Parameters
-        ----------
-        records : list[dict]
-            Records to serialize.
-        filename : str
-            Output filename including extension (e.g., 'assignments.jsonl').
-
-        Returns
-        -------
-        str
-            Full path to the written file.
-        """
-        pass
+        full_path = Path(self.output_path) / filename
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        logger.info("Wrote %d records to %s", len(records), full_path)
+        return str(full_path)
 
     def _save_hdfs(self, records: list[dict], filename: str) -> str:
-        """
-        Write a list of records as a JSONL file to HDFS.
-
-        Placeholder for HDFS backend implementation. Will use HDFSClient
-        once the team confirms HDFS as the output destination for
-        topic modeling results.
-
-        Parameters
-        ----------
-        records : list[dict]
-            Records to serialize.
-        filename : str
-            Output filename.
-
-        Returns
-        -------
-        str
-            Full HDFS path to the written file.
-
-        Raises
-        ------
-        NotImplementedError
-            Until the team confirms the HDFS output path structure.
-        """
-        raise NotImplementedError(
-            "HDFS backend not yet implemented. "
-            "Confirm output path structure with the team first."
-        )
+        hdfs = HDFSClient()
+        hdfs_path = f"{self.output_path}/{filename}"
+        # HDFSClient.write_json expects source/category routing — write raw instead
+        # by using the full path directly via the two-step WebHDFS CREATE.
+        return hdfs.write_json(records, source="bertopic", category=filename.split("/")[0])
 
     def load_assignments(self, run_id: str) -> list[dict]:
-        """
-        Load previously saved topic assignments for a given run.
-
-        Useful for reloading results without re-fitting the model —
-        for example, when regenerating visualizations or re-indexing
-        into Elasticsearch.
-
-        Parameters
-        ----------
-        run_id : str
-            The run identifier used when the outputs were saved.
-
-        Returns
-        -------
-        list[dict]
-            Per-paper topic assignment records.
-        """
-        pass
+        return self._load_local(f"{run_id}/assignments.jsonl")
 
     def load_topic_info(self, run_id: str) -> list[dict]:
-        """
-        Load previously saved topic metadata for a given run.
+        return self._load_local(f"{run_id}/topic_info.jsonl")
 
-        Parameters
-        ----------
-        run_id : str
-            The run identifier used when the outputs were saved.
-
-        Returns
-        -------
-        list[dict]
-            Per-topic metadata records.
-        """
-        pass
+    def _load_local(self, filename: str) -> list[dict]:
+        full_path = Path(self.output_path) / filename
+        if not full_path.exists():
+            raise FileNotFoundError(f"Output file not found: {full_path}")
+        records = []
+        with open(full_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        return records
 
     def list_runs(self) -> list[str]:
-        """
-        Return a list of all run IDs for which outputs exist.
-
-        Scans the output directory for subdirectories corresponding to
-        past pipeline runs. Useful for comparing results across
-        hyperparameter experiments.
-
-        Returns
-        -------
-        list[str]
-            List of run ID strings, sorted by recency (newest first).
-        """
-        pass
+        base = Path(self.output_path)
+        if not base.exists():
+            return []
+        runs = sorted(
+            [d.name for d in base.iterdir() if d.is_dir()],
+            reverse=True
+        )
+        return runs

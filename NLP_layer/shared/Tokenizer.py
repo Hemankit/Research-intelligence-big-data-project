@@ -22,112 +22,25 @@ import spacy
 
 
 class Tokenizer:
-    """
-    Wraps a spaCy pipeline for sentence splitting and tokenization.
-
-    Loads the spaCy model once on instantiation and exposes methods
-    for sentence splitting, token extraction, and batch processing.
-    Designed to be instantiated once and reused across a full corpus
-    to avoid repeated model loading overhead.
-
-    Parameters
-    ----------
-    model_name : str
-        Name of the spaCy model to load (default: 'en_core_web_sm').
-        Use 'en_core_web_trf' for higher accuracy at greater cost.
-    disable : list[str]
-        spaCy pipeline components to disable for efficiency.
-        Default disables ['ner', 'lemmatizer'] since this class is
-        used for splitting only — NER is handled separately.
-    """
-
     def __init__(self, model_name: str = "en_core_web_sm", disable: list[str] = None):
-        pass
+        self.model_name = model_name
+        self.disable = disable or ["ner", "lemmatizer"]
+        self.nlp = spacy.load(self.model_name, disable=self.disable)
 
     def split_sentences(self, text: str) -> list[str]:
-        """
-        Split a cleaned abstract into individual sentences.
-
-        Uses spaCy's dependency parser-based sentence boundary detection,
-        which handles academic writing patterns better than simple
-        punctuation splitting (e.g., correctly handles abbreviations
-        like 'et al.' and 'Fig.').
-
-        Parameters
-        ----------
-        text : str
-            A single cleaned abstract string.
-
-        Returns
-        -------
-        list[str]
-            Ordered list of sentence strings extracted from the abstract.
-            Empty or whitespace-only sentences are excluded.
-        """
-        pass
+        doc = self.nlp(text)
+        return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
 
     def tokenize(self, text: str) -> list[str]:
-        """
-        Tokenize a cleaned abstract into a flat list of token strings.
-
-        Returns surface-form tokens (not lemmatized) with punctuation
-        tokens filtered out. Useful for vocabulary analysis and as input
-        to models that expect pre-tokenized text.
-
-        Parameters
-        ----------
-        text : str
-            A single cleaned abstract string.
-
-        Returns
-        -------
-        list[str]
-            List of token strings with punctuation removed.
-        """
-        pass
+        doc = self.nlp(text)
+        return [token.text for token in doc if not token.is_punct and token.text.strip()]
 
     def tokenize_with_pos(self, text: str) -> list[tuple]:
-        """
-        Tokenize a cleaned abstract and return tokens with POS tags.
-
-        Returns surface-form tokens paired with their coarse-grained
-        part-of-speech tags (NOUN, VERB, ADJ, etc.). Useful for
-        downstream filtering — for example, the NER pipeline may want
-        to restrict candidate spans to noun phrases.
-
-        Parameters
-        ----------
-        text : str
-            A single cleaned abstract string.
-
-        Returns
-        -------
-        list[tuple]
-            List of (token_string, pos_tag) tuples.
-        """
-        pass
+        doc = self.nlp(text)
+        return [(token.text, token.pos_) for token in doc if not token.is_punct]
 
     def process_batch(self, texts: list[str], batch_size: int = 64) -> list[list[str]]:
-        """
-        Tokenize a list of cleaned abstracts into sentences using
-        spaCy's pipe() for efficient batch processing.
-
-        Uses spaCy's nlp.pipe() which streams documents through the
-        pipeline in batches, significantly faster than calling
-        split_sentences() in a loop for large corpora.
-
-        Parameters
-        ----------
-        texts : list[str]
-            List of cleaned abstract strings.
-        batch_size : int
-            Number of documents to process per spaCy batch (default 64).
-            Increase for faster throughput on large corpora if memory allows.
-
-        Returns
-        -------
-        list[list[str]]
-            List of sentence lists, one per input abstract, in the same
-            order as the input.
-        """
-        pass
+        results = []
+        for doc in self.nlp.pipe(texts, batch_size=batch_size):
+            results.append([sent.text.strip() for sent in doc.sents if sent.text.strip()])
+        return results

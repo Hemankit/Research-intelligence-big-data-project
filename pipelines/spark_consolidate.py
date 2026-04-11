@@ -370,6 +370,282 @@ def consolidate_edges(spark: SparkSession) -> None:
     logger.info("Successfully wrote citation edges to %s", table)
 
 
+# BERTopic output → papers table merge 
+
+def read_bertopic_output(spark: SparkSession) -> DataFrame:
+    """
+    Read per-paper BERTopic spark_merge records written by run_bertopic.py.
+
+    The spark_merge records live under:
+        raw/bertopic/<date>/spark_merge/<date>/<timestamp>.jsonl
+
+    We use a specific glob targeting the spark_merge subdirectory to avoid
+    schema inference errors from mixing assignments/topic_info/coordinates
+    files which have different schemas.
+    """
+    BERTOPIC_SCHEMA = StructType([
+        StructField("paper_id",         StringType(),  True),
+        StructField("topic_cluster_id", IntegerType(), True),
+        StructField("topic_cluster",    StringType(),  True),
+        StructField("umap_x",           FloatType(),   True),
+        StructField("umap_y",           FloatType(),   True),
+    ])
+
+    # Try multiple glob depths to handle both normal and doubled date paths
+    dfs = []
+    for pattern in ("bertopic/*/spark_merge/*/*", "bertopic/*/spark_merge/*"):
+        path = f"{HDFS_BASE}/{pattern}"
+        logger.info("Trying BERTopic path: %s", path)
+        try:
+            df = spark.read.json(path)
+            if not df.rdd.isEmpty() and "topic_cluster_id" in df.columns:
+                dfs.append(df)
+                logger.info("Found BERTopic spark_merge data at: %s", path)
+        except Exception:
+            pass
+
+    if not dfs:
+        logger.warning("No BERTopic spark_merge output found — skipping BERTopic merge.")
+        return spark.createDataFrame([], BERTOPIC_SCHEMA)
+
+    combined = dfs[0]
+    for df in dfs[1:]:
+        combined = combined.unionByName(df, allowMissingColumns=True)
+
+    if combined.rdd.isEmpty():
+        return spark.createDataFrame([], BERTOPIC_SCHEMA)
+
+    result = combined.select(
+        F.col("paper_id"),
+        F.col("topic_cluster_id").cast(IntegerType()),
+        F.col("topic_cluster").cast(StringType()),
+        F.col("umap_x").cast(FloatType()),
+        F.col("umap_y").cast(FloatType()),
+    ).filter(
+        F.col("paper_id").isNotNull() & F.col("topic_cluster_id").isNotNull()
+    ).dropDuplicates(["paper_id"])
+
+    count = result.count()
+    logger.info("BERTopic output loaded: %d records", count)
+    return result
+
+
+def merge_bertopic_into_papers(spark: SparkSession) -> None:
+    """
+    Join BERTopic topic assignments into the papers Hive table, populating
+    topic_cluster_id, topic_cluster, umap_x, and umap_y columns.
+
+    Uses the same temp-path pattern as merge_ner_into_papers to avoid
+    the Spark read→write same-table restriction.
+    """
+    bertopic_df = read_bertopic_output(spark)
+    if bertopic_df.rdd.isEmpty():
+        logger.info("No BERTopic data to merge — skipping.")
+        return
+
+    table = f"{HIVE_DB}.{HIVE_TABLE}"
+    logger.info("Reading existing papers table for BERTopic merge: %s", table)
+
+    try:
+        papers_df = spark.table(table)
+    except Exception as e:
+        logger.warning("Could not read papers table: %s", e)
+        return
+
+    # Drop old placeholder BERTopic columns before joining
+    for col in ("topic_cluster_id", "topic_cluster", "umap_x", "umap_y"):
+        if col in papers_df.columns:
+            papers_df = papers_df.drop(col)
+
+    merged = papers_df.join(
+        bertopic_df.select(
+            "paper_id", "topic_cluster_id", "topic_cluster", "umap_x", "umap_y"
+        ),
+        on="paper_id",
+        how="left",
+    )
+
+    # Materialize to temp path to break read→write cycle
+    temp_path = "hdfs://namenode:9000/user/research-intelligence/tmp/papers_bertopic_merge"
+    logger.info("Materializing merged DataFrame to temp path: %s", temp_path)
+    merged.write \
+        .mode("overwrite") \
+        .format("parquet") \
+        .option("compression", "snappy") \
+        .partitionBy("ingest_year_month") \
+        .save(temp_path)
+
+    count = spark.read.parquet(temp_path).count()
+    logger.info("Writing %d papers with BERTopic columns back to %s", count, table)
+
+    spark.read.parquet(temp_path).write \
+        .mode("overwrite") \
+        .format("parquet") \
+        .option("compression", "snappy") \
+        .partitionBy("ingest_year_month") \
+        .saveAsTable(table)
+
+    # Clean up temp path
+    try:
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        hadoop_conf.set("fs.defaultFS", "hdfs://namenode:9000")
+        fs = spark.sparkContext._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+        fs.delete(
+            spark.sparkContext._jvm.org.apache.hadoop.fs.Path(temp_path), True
+        )
+        logger.info("Cleaned up temp path: %s", temp_path)
+    except Exception as e:
+        logger.warning("Could not clean up temp path %s: %s", temp_path, e)
+
+    bertopic_count = bertopic_df.count()
+    logger.info(
+        "BERTopic merge complete — %d papers enriched with topic data", bertopic_count
+    )
+
+
+# NER output → papers table merge 
+
+def read_ner_output(spark: SparkSession) -> DataFrame:
+    """
+    Read per-paper NER entity records written by ner_main.py.
+
+    NER records are stored under raw/ner/ with a date-partitioned structure.
+    Due to a known issue in save_results(), the path may be doubled:
+        raw/ner/2026-04-09/2026-04-09/<timestamp>.jsonl
+    We use a three-level glob (*/*/*) to handle both the normal two-level
+    and the doubled three-level layouts.
+
+    Returns a DataFrame with columns: paper_id, methods, datasets, tasks.
+    Returns an empty DataFrame if no NER output exists yet.
+    """
+    NER_SCHEMA = StructType([
+        StructField("paper_id", StringType(), True),
+        StructField("methods",  ArrayType(StringType()), True),
+        StructField("datasets", ArrayType(StringType()), True),
+        StructField("tasks",    ArrayType(StringType()), True),
+    ])
+
+    # Try three-level glob first (handles doubled date path from save_results bug)
+    # then fall back to two-level glob for correctly structured output
+    dfs = []
+    for glob_pattern in ("ner/*/*/*", "ner/*/*"):
+        path = f"{HDFS_BASE}/{glob_pattern}"
+        logger.info("Trying NER path: %s", path)
+        try:
+            df = spark.read.json(path)
+            if not df.rdd.isEmpty():
+                dfs.append(df)
+                logger.info("Found NER data at: %s", path)
+        except Exception:
+            pass
+
+    if not dfs:
+        logger.warning("No NER output found at any path — skipping NER merge.")
+        return spark.createDataFrame([], NER_SCHEMA)
+
+    # Union all found DataFrames and deduplicate
+    combined = dfs[0]
+    for df in dfs[1:]:
+        combined = combined.unionByName(df, allowMissingColumns=True)
+
+    if combined.rdd.isEmpty():
+        logger.info("NER output path is empty — skipping NER merge.")
+        return spark.createDataFrame([], NER_SCHEMA)
+
+    result = combined.select(
+        F.col("paper_id"),
+        F.col("methods").cast(ArrayType(StringType()))  if "methods"  in combined.columns
+            else F.lit(None).cast(ArrayType(StringType())).alias("methods"),
+        F.col("datasets").cast(ArrayType(StringType())) if "datasets" in combined.columns
+            else F.lit(None).cast(ArrayType(StringType())).alias("datasets"),
+        F.col("tasks").cast(ArrayType(StringType()))    if "tasks"    in combined.columns
+            else F.lit(None).cast(ArrayType(StringType())).alias("tasks"),
+    ).filter(F.col("paper_id").isNotNull()).dropDuplicates(["paper_id"])
+
+    count = result.count()
+    logger.info("NER output loaded: %d records", count)
+    return result
+
+
+def merge_ner_into_papers(spark: SparkSession) -> None:
+    """
+    Join NER entity output into the papers Hive table, populating
+    the methods, datasets, and tasks columns.
+
+    Spark cannot read from and overwrite the same table in one operation.
+    We work around this by materializing the merged DataFrame to a temp
+    HDFS path first, then overwriting the Hive table from that path.
+    The temp path is cleaned up after a successful write.
+    """
+    ner_df = read_ner_output(spark)
+    if ner_df.rdd.isEmpty():
+        logger.info("No NER data to merge — skipping.")
+        return
+
+    table = f"{HIVE_DB}.{HIVE_TABLE}"
+    logger.info("Reading existing papers table for NER merge: %s", table)
+
+    try:
+        papers_df = spark.table(table)
+    except Exception as e:
+        logger.warning("Could not read papers table: %s", e)
+        return
+
+    # Drop the old placeholder NER columns before joining
+    for col in ("methods", "datasets", "tasks"):
+        if col in papers_df.columns:
+            papers_df = papers_df.drop(col)
+
+    # Left join — papers without NER output get null arrays
+    merged = papers_df.join(
+        ner_df.select("paper_id", "methods", "datasets", "tasks"),
+        on="paper_id",
+        how="left",
+    )
+
+    # Step 1: materialize to a temp HDFS path to break the read→write cycle.
+    # Spark refuses to overwrite a table it is currently reading from, so we
+    # write the merged result to a staging location first.
+    temp_path = "hdfs://namenode:9000/user/research-intelligence/tmp/papers_ner_merge"
+    logger.info("Materializing merged DataFrame to temp path: %s", temp_path)
+    merged.write \
+        .mode("overwrite") \
+        .format("parquet") \
+        .option("compression", "snappy") \
+        .partitionBy("ingest_year_month") \
+        .save(temp_path)
+
+    # Step 2: read back from temp path and overwrite the Hive table.
+    # The papers table is no longer in the query plan so Spark allows the write.
+    count = spark.read.parquet(temp_path).count()
+    logger.info("Writing %d papers with NER columns back to %s", count, table)
+
+    spark.read.parquet(temp_path).write \
+        .mode("overwrite") \
+        .format("parquet") \
+        .option("compression", "snappy") \
+        .partitionBy("ingest_year_month") \
+        .saveAsTable(table)
+
+    # Step 3: clean up temp path
+    try:
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        hadoop_conf.set("fs.defaultFS", "hdfs://namenode:9000")
+        fs = spark.sparkContext._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+        fs.delete(
+            spark.sparkContext._jvm.org.apache.hadoop.fs.Path(temp_path),
+            True  # recursive
+        )
+        logger.info("Cleaned up temp path: %s", temp_path)
+    except Exception as e:
+        logger.warning("Could not clean up temp path %s: %s", temp_path, e)
+
+    ner_count = ner_df.count()
+    logger.info(
+        "NER merge complete — %d papers enriched with entity data", ner_count
+    )
+
+
 # Full-text table (Option B — separate from papers table) 
 
 def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
@@ -486,6 +762,14 @@ def main():
         "--skip-fulltext", action="store_true",
         help="Skip full-text consolidation into paper_fulltext table",
     )
+    parser.add_argument(
+        "--skip-ner", action="store_true",
+        help="Skip NER merge into papers table (methods/datasets/tasks columns)",
+    )
+    parser.add_argument(
+        "--skip-bertopic", action="store_true",
+        help="Skip BERTopic merge into papers table (topic_cluster_id/topic_cluster/umap columns)",
+    )
     args = parser.parse_args()
 
     # Build Spark session
@@ -532,6 +816,14 @@ def main():
         # 6. Consolidate full-text into separate paper_fulltext table (Option B)
         if not args.skip_fulltext:
             consolidate_fulltext(spark)
+
+        # 7. Merge NER output into papers table (methods/datasets/tasks columns)
+        if not args.skip_ner:
+            merge_ner_into_papers(spark)
+
+        # 8. Merge BERTopic output into papers table (topic/umap columns)
+        if not args.skip_bertopic:
+            merge_bertopic_into_papers(spark)
 
         logger.info("=" * 60)
         logger.info("Consolidation complete!")

@@ -138,6 +138,41 @@ class HDFSClient:
         logger.info("Wrote %d records to HDFS: %s", len(records), file_path)
         return file_path
 
+    def list_directory(self, hdfs_path: str) -> list[str]:
+        """
+        List the names of files and subdirectories in an HDFS directory.
+
+        Returns an empty list if the path does not exist or is not a
+        directory — callers should treat an empty result as "nothing here"
+        rather than an error, so the NER and BERTopic loaders can safely
+        skip missing partitions.
+
+        Parameters
+        ----------
+        hdfs_path : str
+            Absolute HDFS path to the directory to list.
+
+        Returns
+        -------
+        list[str]
+            Sorted list of child names (not full paths).
+        """
+        url = self._url(hdfs_path) + "&op=LISTSTATUS"
+        try:
+            resp = requests.get(url)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            statuses = (
+                resp.json()
+                .get("FileStatuses", {})
+                .get("FileStatus", [])
+            )
+            return sorted(s["pathSuffix"] for s in statuses)
+        except Exception as e:
+            logger.warning("list_directory failed for %s: %s", hdfs_path, e)
+            return []
+
     def file_exists(self, hdfs_path: str) -> bool:
         """Return True if a file or directory exists on HDFS."""
         url = self._url(hdfs_path) + "&op=GETFILESTATUS"
@@ -182,32 +217,3 @@ class HDFSClient:
                         hdfs_path, e
                     )
         return records
-
-    def list_directory(self, hdfs_path: str) -> list[str]:
-        """
-        List all files and subdirectories in an HDFS directory.
-
-        Uses the WebHDFS LISTSTATUS operation to retrieve directory contents.
-        Returns only the names (not full paths) of files and subdirectories.
-
-        Parameters
-        ----------
-        hdfs_path : str
-            HDFS directory path to list.
-
-        Returns
-        -------
-        list[str]
-            List of file and directory names in the specified path.
-            Returns empty list if the directory does not exist or is empty.
-        """
-        url = self._url(hdfs_path) + "&op=LISTSTATUS"
-        resp = requests.get(url)
-
-        if resp.status_code != 200:
-            logger.warning("Directory does not exist or cannot be listed: %s", hdfs_path)
-            return []
-
-        data = resp.json()
-        file_statuses = data.get("FileStatuses", {}).get("FileStatus", [])
-        return [f["pathSuffix"] for f in file_statuses]

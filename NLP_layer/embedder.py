@@ -21,6 +21,7 @@ Dependencies: sentence-transformers, numpy
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import os
+import torch 
 
 class Embedder:
     """
