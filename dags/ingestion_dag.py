@@ -153,6 +153,9 @@ def task_enrich_s2orc(ti, **kwargs) -> None:
 
     Adds jitter before starting. Writes enriched metadata + citation
     edges to HDFS. Skips gracefully if no IDs came from arXiv task.
+
+    Uses XCom IDs directly rather than re-reading from HDFS to avoid
+    redundant WebHDFS calls and XCom size limit issues.
     """
     import sys
     sys.path.insert(0, "/opt/airflow")
@@ -179,27 +182,19 @@ def task_enrich_s2orc(ti, **kwargs) -> None:
     time.sleep(jitter)
 
     hdfs = HDFSClient()
-    total_papers, total_edges = 0, 0
 
-    for category in CATEGORIES:
-        cat_ids = _read_todays_ids(hdfs, [category], source="arxiv")
-        if not cat_ids:
-            continue
-        papers, edges = enrich_papers(
-            arxiv_ids=cat_ids, category=category, hdfs_client=hdfs
-        )
-        total_papers += papers
-        total_edges  += edges
-
-        # Brief pause between categories to avoid back-to-back bursts
-        time.sleep(5)
+    # Enrich all IDs in one call — enrich_papers handles batching internally
+    papers, edges = enrich_papers(
+        arxiv_ids=paper_ids,
+        category="s2orc_bulk",
+        hdfs_client=hdfs,
+    )
 
     logger.info(
-        "S2ORC task complete | enriched=%d | edges=%d",
-        total_papers, total_edges
+        "S2ORC task complete | enriched=%d | edges=%d", papers, edges
     )
-    ti.xcom_push(key="s2_papers", value=total_papers)
-    ti.xcom_push(key="s2_edges",  value=total_edges)
+    ti.xcom_push(key="s2_papers", value=papers)
+    ti.xcom_push(key="s2_edges",  value=edges)
 
 
 def task_enrich_openalex(ti, **kwargs) -> None:
@@ -208,6 +203,8 @@ def task_enrich_openalex(ti, **kwargs) -> None:
 
     Adds jitter before starting. Adds citation counts, author
     institutions, and concept tags. Skips gracefully if no IDs available.
+
+    Uses XCom IDs directly rather than re-reading from HDFS per category.
     """
     import sys
     sys.path.insert(0, "/opt/airflow")
@@ -234,19 +231,11 @@ def task_enrich_openalex(ti, **kwargs) -> None:
     time.sleep(jitter)
 
     hdfs  = HDFSClient()
-    total = 0
-
-    for category in CATEGORIES:
-        cat_ids = _read_todays_ids(hdfs, [category], source="arxiv")
-        if not cat_ids:
-            continue
-        count = enrich_openalex(
-            arxiv_ids=cat_ids, category=category, hdfs_client=hdfs
-        )
-        total += count
-
-        # Brief pause between categories
-        time.sleep(3)
+    total = enrich_openalex(
+        arxiv_ids=paper_ids,
+        category="openalex_bulk",
+        hdfs_client=hdfs,
+    )
 
     logger.info("OpenAlex task complete | enriched=%d", total)
     ti.xcom_push(key="oa_papers", value=total)
@@ -298,7 +287,7 @@ with DAG(
         "Ingestion of academic papers from arXiv, S2ORC, and OpenAlex "
         "every 2 days at 03:00 UTC with rate limit health checks and jitter"
     ),
-    schedule_interval="0 3 */2 * *",   # 03:00 UTC every 2 days (off-peak)
+    schedule="0 3 */2 * *",            # 03:00 UTC every 2 days (off-peak)
     start_date=datetime(2026, 3, 25),
     catchup=False,                      # don't backfill missed runs
     default_args=default_args,

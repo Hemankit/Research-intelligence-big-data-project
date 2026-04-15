@@ -19,6 +19,7 @@ Dependencies: joblib, tqdm
 
 from joblib import Parallel, delayed
 from tqdm import tqdm
+import os 
 
 
 class ParallelExecutor:
@@ -186,4 +187,4 @@ def get_n_jobs(reserve_cores: int = 1) -> int:
     int
         Recommended number of parallel jobs.
     """
-    pass
+    return max(1, os.cpu_count() - reserve_cores)

@@ -20,7 +20,6 @@ Recommended model: en_core_web_sm (sufficient for sentence splitting)
 
 import spacy
 
-
 class Tokenizer:
     def __init__(self, model_name: str = "en_core_web_sm", disable: list[str] = None):
         self.model_name = model_name

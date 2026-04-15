@@ -65,7 +65,7 @@ def get_hive_connection():
     )
 
 
-def query_hive(sql: str, params: dict = None) -> list[dict]:
+def query_hive(sql: str) -> list[dict]:
     """
     Execute a HiveQL query and return results as a list of dicts.
     Each dict maps column names to values.
@@ -79,6 +79,11 @@ def query_hive(sql: str, params: dict = None) -> list[dict]:
         return [dict(zip(columns, row)) for row in rows]
     finally:
         conn.close()
+
+
+def _esc(value: str) -> str:
+    """Escape a string value for safe interpolation into HiveQL."""
+    return value.replace("'", "''")
 
 
 def get_es_client() -> Elasticsearch:
@@ -164,13 +169,13 @@ def get_trends(
         WHERE 1=1
     """
     if category:
-        sql += f" AND primary_category = '{category}'"
+        sql += f" AND primary_category = '{_esc(category)}'"
     if topic:
-        sql += f" AND topic_cluster = '{topic}'"
+        sql += f" AND topic_cluster = '{_esc(topic)}'"
     if start:
-        sql += f" AND year_month >= '{start}'"
+        sql += f" AND year_month >= '{_esc(start)}'"
     if end:
-        sql += f" AND year_month <= '{end}'"
+        sql += f" AND year_month <= '{_esc(end)}'"
 
     sql += " ORDER BY year_month ASC"
 
@@ -219,9 +224,9 @@ def get_papers(
         WHERE 1=1
     """
     if category:
-        sql += f" AND p.primary_category = '{category}'"
+        sql += f" AND p.primary_category = '{_esc(category)}'"
     if source:
-        sql += f" AND p.source = '{source}'"
+        sql += f" AND p.source = '{_esc(source)}'"
 
     sql += f" ORDER BY {sort_by} {order} LIMIT {limit} OFFSET {offset}"
 
@@ -254,7 +259,7 @@ def get_top_papers(
         WHERE s.pagerank_score IS NOT NULL
     """
     if category:
-        sql += f" AND p.primary_category = '{category}'"
+        sql += f" AND p.primary_category = '{_esc(category)}'"
 
     sql += f" ORDER BY s.pagerank_score DESC LIMIT {limit}"
 
@@ -277,7 +282,7 @@ def get_paper_detail(paper_id: str):
         SELECT p.*, s.pagerank_score
         FROM papers p
         LEFT JOIN pagerank_scores s ON p.paper_id = s.paper_id
-        WHERE p.paper_id = '{paper_id}'
+        WHERE p.paper_id = '{_esc(paper_id)}'
     """
 
     try:
@@ -289,10 +294,10 @@ def get_paper_detail(paper_id: str):
 
         # Get citation neighbors
         citing_sql = f"""
-            SELECT citing_id FROM citation_edges WHERE cited_id = '{paper_id}'
+            SELECT citing_id FROM citation_edges WHERE cited_id = '{_esc(paper_id)}'
         """
         cited_by_sql = f"""
-            SELECT cited_id FROM citation_edges WHERE citing_id = '{paper_id}'
+            SELECT cited_id FROM citation_edges WHERE citing_id = '{_esc(paper_id)}'
         """
 
         paper["cited_by"] = [r["citing_id"] for r in query_hive(citing_sql)]
@@ -347,7 +352,7 @@ def search_papers(
                     {"term": {"primary_category": category}}
                 ]
 
-            resp = es.search(index=ES_INDEX, body=body)
+            resp = es.search(index=ES_INDEX, **body)  # body= deprecated in ES 8.x
             hits = resp.get("hits", {}).get("hits", [])
             papers = [
                 {**hit["_source"], "score": hit["_score"]}
@@ -373,7 +378,7 @@ def search_papers(
         WHERE (p.title LIKE '%{safe_q}%' OR p.abstract LIKE '%{safe_q}%')
     """
     if category:
-        sql += f" AND p.primary_category = '{category}'"
+        sql += f" AND p.primary_category = '{_esc(category)}'"
     sql += f" LIMIT {limit}"
 
     try:
@@ -494,7 +499,7 @@ def get_citations(
                 FROM citation_edges e
                 LEFT JOIN papers p ON e.citing_id = p.paper_id
                 LEFT JOIN pagerank_scores s ON e.citing_id = s.paper_id
-                WHERE e.cited_id = '{paper_id}'
+                WHERE e.cited_id = '{_esc(paper_id)}'
                 LIMIT {limit}
             """
             result["cited_by"] = query_hive(sql)
@@ -505,7 +510,7 @@ def get_citations(
                 FROM citation_edges e
                 LEFT JOIN papers p ON e.cited_id = p.paper_id
                 LEFT JOIN pagerank_scores s ON e.cited_id = s.paper_id
-                WHERE e.citing_id = '{paper_id}'
+                WHERE e.citing_id = '{_esc(paper_id)}'
                 LIMIT {limit}
             """
             result["references"] = query_hive(sql)
