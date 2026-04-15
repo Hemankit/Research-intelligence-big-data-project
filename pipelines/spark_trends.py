@@ -6,10 +6,6 @@ Reads from the Hive `research_intel.papers` table (and optionally
 `pagerank_scores`), computes trend aggregations by category and month,
 and writes results to the `research_intel.trends` table.
 
-Currently runs WITHOUT BERTopic topic clusters (topic_cluster = null).
-Once BERTopic is complete, re-run this job and it will automatically
-pick up the topic_cluster column and aggregate by topic as well.
-
 Usage:
     MSYS_NO_PATHCONV=1 docker exec -it spark-master \
         /opt/spark/bin/spark-submit \

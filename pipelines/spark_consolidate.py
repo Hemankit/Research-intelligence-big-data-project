@@ -72,8 +72,14 @@ UNIFIED_SCHEMA = StructType([
 # Kept narrow on purpose — only the fields needed for full-text workloads
 # (BERTopic, NER, search indexing). Metadata lives in the papers table
 # and is joined on paper_id when needed.
+#
+# Join strategy: paper_id is the primary join key (arXiv ID when available,
+# S2ORC corpusid otherwise). arxiv_id and corpusid are stored as secondary
+# keys so downstream jobs can join on whichever is available.
 FULLTEXT_SCHEMA = StructType([
     StructField("paper_id",   StringType(), True),
+    StructField("arxiv_id",   StringType(), True),
+    StructField("corpusid",   StringType(), True),
     StructField("full_text",  StringType(), True),
     StructField("sections",   ArrayType(
         StructType([
@@ -653,13 +659,11 @@ def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
     Read S2ORC full-text JSONL records from s2orc_fulltext/ into a DataFrame
     matching FULLTEXT_SCHEMA.
 
-    Records here were produced by s2orc_bulk_download.py chaining into
-    S2ORCIngester corpus mode. Each record has full_text (the complete paper
-    body) and sections (list of {heading, text} dicts).
-
-    Authors, title, abstract, and citation counts are intentionally NOT
-    read here — they live in the papers table and should be joined on
-    paper_id rather than duplicated.
+    Stores arxiv_id and corpusid as secondary join keys alongside paper_id
+    so downstream jobs can join paper_fulltext to papers on whichever key
+    is available. This handles the common case where full-text records are
+    S2ORC-only papers with no arXiv ID — their paper_id is a numeric corpusid
+    that doesn't exist in the papers table, making direct joins return zero rows.
     """
     path = f"{HDFS_BASE}/s2orc/s2orc_fulltext/*/*"
     logger.info("Reading S2ORC full-text records from: %s", path)
@@ -680,9 +684,21 @@ def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
             F.col("full_text").isNotNull() & (F.col("full_text") != "")
         )
 
-    # Build the select — handle optional columns defensively so the job
-    # doesn't crash if a field is missing from older records.
-    select_exprs = [F.col("paper_id")]
+    # Extract arxiv_id from paper_id: arXiv IDs match NNNN.NNNNN format.
+    # corpusid is the numeric S2ORC ID — store it for S2ORC-only papers.
+    arxiv_pattern = r"^\d{4}\.\d{4,6}$"
+
+    select_exprs = [
+        F.col("paper_id"),
+        # arxiv_id: paper_id itself when it looks like an arXiv ID, else null
+        F.when(
+            F.col("paper_id").rlike(arxiv_pattern), F.col("paper_id")
+        ).otherwise(F.lit(None)).alias("arxiv_id"),
+        # corpusid: paper_id itself when it's a pure integer (S2ORC corpusid)
+        F.when(
+            ~F.col("paper_id").rlike(arxiv_pattern), F.col("paper_id")
+        ).otherwise(F.lit(None)).alias("corpusid"),
+    ]
 
     select_exprs.append(
         F.col("full_text") if "full_text" in df.columns

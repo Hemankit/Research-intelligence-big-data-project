@@ -1,32 +1,31 @@
 """
-loader.py
----------
-Loads and merges paper abstracts from HDFS across all three ingested
-sources (arXiv, S2ORC, OpenAlex) into a single flat corpus for BERTopic.
+loader.py — loads and merges paper abstracts from HDFS for BERTopic.
 
-Unlike the NER pipeline which processes documents independently, BERTopic
-requires the full corpus to be available as a single list before fitting
-begins. This module is responsible for assembling that list efficiently.
-
-Also handles deduplication of abstracts that may appear across multiple
-sources (e.g., a paper ingested from both arXiv and S2ORC), and filters
-out records with missing or very short abstracts that would degrade
-topic model quality.
-
-Dependencies: ingestion/hdfs_client.py, shared/text_cleaner.py
+Uses TextCleaner for LaTeX/URL/Unicode cleaning and spaCy (via Tokenizer)
+for sentence splitting. Sentence splitting ensures clean sentence boundaries
+before embedding — BERTopic produces better topic coherence when abstracts
+are properly segmented rather than treated as one continuous string.
 """
 import logging
 from ingestion.hdfs_client import HDFSClient
 from NLP_layer.shared.text_preprocessing import TextCleaner
+from NLP_layer.shared.Tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
 
 
 class CorpusLoader:
     def __init__(self, hdfs_client: HDFSClient, min_abstract_length: int = 100):
-        self.hdfs = hdfs_client
+        self.hdfs    = hdfs_client
         self.min_abstract_length = min_abstract_length
-        self.cleaner = TextCleaner()
+        self.cleaner  = TextCleaner()
+        # Load spaCy once — reused across all documents.
+        # Disable NER and lemmatizer since we only need sentence splitting.
+        self.tokenizer = Tokenizer(
+            model_name="en_core_web_sm",
+            disable=["ner", "lemmatizer"],
+        )
+        logger.info("CorpusLoader initialized (spaCy sentence splitter loaded)")
 
     def load(
         self,
@@ -42,17 +41,45 @@ class CorpusLoader:
             all_records.extend(records)
         all_records = self._deduplicate(all_records)
         all_records = self._filter_abstracts(all_records)
+
         paper_ids = [r["paper_id"] for r in all_records]
-        abstracts = [self.cleaner.clean(r["abstract"]) for r in all_records]
+
+        # 1. Clean with TextCleaner (LaTeX, URLs, Unicode, whitespace)
+        # 2. Sentence-split with spaCy, then rejoin with spaces so the
+        #    abstract is a clean, properly segmented string for embedding.
+        #    spaCy's sentence splitter handles abbreviations like "et al."
+        #    and "Fig." better than naive punctuation splitting.
+        raw_abstracts = [r["abstract"] for r in all_records]
+        cleaned       = self.cleaner.clean_batch(raw_abstracts)
+        abstracts     = self._sentence_split_batch(cleaned)
+
         logger.info("CorpusLoader: %d papers ready for embedding", len(paper_ids))
         return paper_ids, abstracts
+
+    def _sentence_split_batch(self, texts: list[str]) -> list[str]:
+        """
+        Split each abstract into sentences via spaCy then rejoin with a
+        single space. This normalizes sentence boundaries and removes any
+        stray newlines or irregular spacing left after cleaning.
+
+        Uses spaCy's nlp.pipe() for efficient batch processing.
+        """
+        logger.info(
+            "Sentence-splitting %d abstracts via spaCy...", len(texts)
+        )
+        result = []
+        # process_batch returns list[list[str]] — one sentence list per abstract
+        sentence_lists = self.tokenizer.process_batch(texts, batch_size=64)
+        for sentences in sentence_lists:
+            result.append(" ".join(sentences) if sentences else "")
+        logger.info("Sentence splitting complete")
+        return result
 
     def _load_source(self, input_path: str, source: str, date_from: str, date_to: str) -> list[dict]:
         source_path = f"{input_path}/{source}"
         records = []
         categories = self.hdfs.list_directory(source_path)
         for category in categories:
-            # Skip edge/fulltext partitions — metadata only for BERTopic
             if category in ("edges", "s2orc_fulltext"):
                 continue
             cat_path = f"{source_path}/{category}"
@@ -86,14 +113,14 @@ class CorpusLoader:
                 seen[pid] = rec
             else:
                 existing_priority = SOURCE_PRIORITY.get(seen[pid].get("source", ""), 99)
-                new_priority = SOURCE_PRIORITY.get(rec.get("source", ""), 99)
+                new_priority      = SOURCE_PRIORITY.get(rec.get("source", ""), 99)
                 if new_priority < existing_priority:
                     seen[pid] = rec
         logger.info("After dedup: %d unique papers", len(seen))
         return list(seen.values())
 
     def _filter_abstracts(self, records: list[dict]) -> list[dict]:
-        before = len(records)
+        before   = len(records)
         filtered = [
             r for r in records
             if r.get("abstract") and len(r["abstract"].strip()) >= self.min_abstract_length

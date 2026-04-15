@@ -96,7 +96,9 @@ TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 --    fast. Join on paper_id when full text is needed.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS paper_fulltext (
-    paper_id            STRING      COMMENT 'arXiv ID or S2ORC corpusid — joins to papers.paper_id',
+    paper_id            STRING      COMMENT 'Primary join key: arXiv ID or S2ORC corpusid',
+    arxiv_id            STRING      COMMENT 'arXiv ID if available (NNNN.NNNNN format) — joins to papers.paper_id for arXiv papers',
+    corpusid            STRING      COMMENT 'S2ORC numeric corpus ID — joins to papers.paper_id for S2ORC-only papers',
     full_text           STRING      COMMENT 'Complete parsed paper body (~45K chars avg)',
     sections            ARRAY<STRUCT<
                             heading: STRING,
