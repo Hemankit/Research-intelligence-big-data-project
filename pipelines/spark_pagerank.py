@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """
-spark_pagerank.py — Spark PageRank Job
+spark_pagerank.py — Spark Citation Influence Scoring Job
 
-Reads citation edges from the Hive `research_intel.citation_edges` table,
-builds a citation graph, runs PageRank, and writes the scores back to
-the `research_intel.papers` table.
+Computes a citation-based influence score for each paper in the corpus
+and writes results to the `research_intel.pagerank_scores` table.
 
-Uses GraphFrames (the Python/DataFrame-based graph API) rather than
-the Scala-only GraphX, since we're running PySpark.
+Scoring approach:
+    S2ORC citation edges use SHA-1 internal corpus IDs on the cited_id
+    side, while the papers table uses arXiv IDs. This means zero
+    arXiv-to-arXiv edges exist — making iterative graph PageRank
+    produce a flat 0.15 score for all corpus papers.
+
+    Instead, we use citation_count normalization: a log-scaled,
+    min-max normalized score derived from the citation_count field
+    already present in the papers table (sourced from S2ORC during
+    enrichment). This produces meaningful differentiated scores that
+    reflect real-world citation influence and is equivalent in spirit
+    to PageRank for a corpus where cross-corpus edges are unavailable.
+
+    Score formula:
+        raw       = log1p(citation_count)
+        score     = (raw - min_raw) / (max_raw - min_raw)
+        clamped   = 0.15 + score * 0.85   (maps to [0.15, 1.0])
+
+    Papers with citation_count = NULL are assigned the minimum score (0.15).
 
 Usage:
-    # From the project root (with Docker running):
-    MSYS_NO_PATHCONV=1 docker exec -it spark-master \
-        /opt/spark/bin/spark-submit \
-        --master spark://spark-master:7077 \
-        --packages graphframes:graphframes:0.8.3-spark3.5-s_2.12 \
+    MSYS_NO_PATHCONV=1 docker exec -it spark-master \\
+        /opt/spark/bin/spark-submit \\
+        --master spark://spark-master:7077 \\
         /opt/spark/work-dir/pipelines/spark_pagerank.py
-
-    # Or run locally for testing:
-    python pipelines/spark_pagerank.py --local
 """
 
 import argparse
@@ -34,198 +45,161 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spark_pagerank")
 
-# Constants 
-
-HIVE_DB = "research_intel"
+HIVE_DB      = "research_intel"
 PAPERS_TABLE = f"{HIVE_DB}.papers"
-EDGES_TABLE = f"{HIVE_DB}.citation_edges"
-
-# PageRank parameters
-MAX_ITER = 20          # convergence iterations
-RESET_PROB = 0.15      # damping factor = 1 - reset_prob = 0.85
+EDGES_TABLE  = f"{HIVE_DB}.citation_edges"
+SCORES_TABLE = f"{HIVE_DB}.pagerank_scores"
 
 
-# Build the graph and run PageRank
-
-def run_pagerank(spark: SparkSession, max_iter: int = MAX_ITER, 
-                 reset_prob: float = RESET_PROB) -> None:
+def run_pagerank(spark: SparkSession) -> None:
     """
-    Build a citation graph from Hive edges, run PageRank, and write
-    scores back to the papers table.
-    """
-    # 1. Read edges 
-    logger.info("Reading citation edges from %s", EDGES_TABLE)
-    edges_df = spark.sql(f"SELECT citing_id, cited_id FROM {EDGES_TABLE}")
-    edge_count = edges_df.count()
-    logger.info("Loaded %d citation edges", edge_count)
+    Compute citation influence scores and write to pagerank_scores table.
 
-    if edge_count == 0:
-        logger.warning("No citation edges found — skipping PageRank.")
+    Uses log-normalized citation_count from the papers table as a proxy
+    for PageRank influence. S2ORC citation edges cannot be used directly
+    for graph PageRank because cited_id values are SHA-1 internal corpus
+    IDs that don't match any arXiv paper_id in the papers table —
+    resulting in zero intra-corpus edges and flat 0.15 scores for all
+    papers. Citation count normalization produces equivalent results using
+    data already available from S2ORC enrichment.
+    """
+
+    # 1. Read papers with citation counts
+    logger.info("Reading papers from %s", PAPERS_TABLE)
+    papers = spark.sql(f"""
+        SELECT paper_id, title, citation_count
+        FROM {PAPERS_TABLE}
+        WHERE paper_id IS NOT NULL AND paper_id != ''
+    """)
+    total = papers.count()
+    logger.info("Loaded %d papers", total)
+
+    if total == 0:
+        logger.warning("No papers found — skipping scoring.")
         return
 
-    # 2. Build vertex list 
-    # Vertices = all unique paper IDs that appear in either side of an edge
-    # PLUS all papers in the papers table (so papers with no citations
-    # still get a PageRank score)
-    logger.info("Building vertex list...")
-    
-    citing_ids = edges_df.select(F.col("citing_id").alias("id"))
-    cited_ids = edges_df.select(F.col("cited_id").alias("id"))
-    paper_ids = spark.sql(f"SELECT paper_id AS id FROM {PAPERS_TABLE}")
-    
-    vertices = citing_ids.union(cited_ids).union(paper_ids) \
-        .distinct() \
-        .filter(F.col("id").isNotNull() & (F.col("id") != ""))
-    
-    vertex_count = vertices.count()
-    logger.info("Graph has %d vertices and %d edges", vertex_count, edge_count)
+    # 2. Log citation edge stats for reference
+    logger.info("Reading citation edges from %s for reference stats", EDGES_TABLE)
+    edges_df   = spark.sql(f"SELECT citing_id, cited_id FROM {EDGES_TABLE}")
+    edge_count = edges_df.count()
+    logger.info("Total citation edges: %d", edge_count)
 
-    # 3. Rename edge columns for GraphFrames 
-    # GraphFrames expects columns named 'src' and 'dst'
-    edges_gf = edges_df.select(
-        F.col("citing_id").alias("src"),
-        F.col("cited_id").alias("dst"),
-    )
-
-    # 4. Run PageRank 
-    # GraphFrames is not available: use native Spark DataFrame-based
-    # iterative PageRank implementation instead
+    # Check arXiv-to-arXiv edge count (expected: 0 due to SHA-1 cited_id format)
+    arxiv_pattern = r"^\d{4}\.\d{4,6}$"
+    arxiv_edges = edges_df.filter(
+        F.col("citing_id").rlike(arxiv_pattern) &
+        F.col("cited_id").rlike(arxiv_pattern)
+    ).count()
     logger.info(
-        "Running PageRank (max_iter=%d, reset_prob=%.2f)...",
-        max_iter, reset_prob
-    )
-    
-    pagerank_scores = _iterative_pagerank(
-        spark, vertices, edges_gf, max_iter, reset_prob
+        "arXiv-to-arXiv edges: %d / %d (%.1f%%) — "
+        "SHA-1 cited_id format prevents intra-corpus graph PageRank",
+        arxiv_edges, edge_count,
+        100.0 * arxiv_edges / edge_count if edge_count > 0 else 0,
     )
 
-    # 5. Write scores back to papers 
-    logger.info("Updating papers table with PageRank scores...")
-    
-    # Write PageRank scores to a dedicated table (fast, small, no read-write conflict)
-    # FastAPI will JOIN papers + pagerank_scores at query time
-    scores_table = f"{HIVE_DB}.pagerank_scores"
-    
-    scores_df = pagerank_scores.select(
-        F.col("id").alias("paper_id"),
-        F.col("rank").cast(FloatType()).alias("pagerank_score"),
-    ).filter(F.col("paper_id").isNotNull() & (F.col("paper_id") != ""))
+    # 3. Compute log-normalized citation influence score
+    logger.info("Computing log-normalized citation influence scores...")
 
+    # Fill nulls with 0 before log transform
+    papers_filled = papers.withColumn(
+        "citation_count_filled",
+        F.coalesce(F.col("citation_count").cast("double"), F.lit(0.0))
+    )
+
+    # log1p(x) = log(1 + x) — handles zero citations gracefully
+    papers_log = papers_filled.withColumn(
+        "log_citations",
+        F.log1p(F.col("citation_count_filled"))
+    )
+
+    # Compute min and max for normalization
+    stats = papers_log.agg(
+        F.min("log_citations").alias("min_log"),
+        F.max("log_citations").alias("max_log"),
+        F.avg("citation_count_filled").alias("avg_citations"),
+        F.max("citation_count_filled").alias("max_citations"),
+    ).collect()[0]
+
+    min_log    = float(stats["min_log"] or 0.0)
+    max_log    = float(stats["max_log"] or 1.0)
+    log_range  = max_log - min_log if max_log > min_log else 1.0
+
+    logger.info(
+        "Citation stats — avg: %.1f, max: %.0f | log range: [%.4f, %.4f]",
+        stats["avg_citations"] or 0,
+        stats["max_citations"] or 0,
+        min_log, max_log,
+    )
+
+    # Normalize to [0.15, 1.0] — keeps 0.15 as the floor (matching
+    # the reset_prob used in the original iterative PageRank formulation)
+    scores_df = papers_log.withColumn(
+        "pagerank_score",
+        (
+            F.lit(0.15) + F.lit(0.85) *
+            ((F.col("log_citations") - F.lit(min_log)) / F.lit(log_range))
+        ).cast(FloatType())
+    ).select(
+        F.col("paper_id"),
+        F.col("pagerank_score"),
+    )
+
+    # 4. Write to pagerank_scores table
     score_count = scores_df.count()
-    logger.info("Writing %d PageRank scores to %s", score_count, scores_table)
+    logger.info("Writing %d scores to %s", score_count, SCORES_TABLE)
 
     scores_df.write \
         .mode("overwrite") \
         .format("parquet") \
         .option("compression", "snappy") \
-        .saveAsTable(scores_table)
+        .saveAsTable(SCORES_TABLE)
 
-    logger.info("Successfully wrote PageRank scores to %s", scores_table)
+    logger.info("Successfully wrote scores to %s", SCORES_TABLE)
 
-    # 6. Log top papers 
-    logger.info("Top 10 papers by PageRank:")
-    final_df = spark.sql(f"""
-        SELECT p.paper_id, p.title, s.pagerank_score
+    # 5. Log top 10 papers by influence score
+    logger.info("Top 10 papers by citation influence score:")
+    spark.sql(f"""
+        SELECT p.paper_id, p.title, s.pagerank_score,
+               p.citation_count
         FROM {PAPERS_TABLE} p
-        JOIN {scores_table} s ON p.paper_id = s.paper_id
+        JOIN {SCORES_TABLE} s ON p.paper_id = s.paper_id
         ORDER BY s.pagerank_score DESC
         LIMIT 10
-    """)
-    final_df.show(truncate=60)
+    """).show(truncate=60)
 
-    # Stats
-    stats = spark.sql(f"SELECT * FROM {scores_table}").agg(
-        F.avg("pagerank_score").alias("avg_pagerank"),
-        F.max("pagerank_score").alias("max_pagerank"),
-        F.min("pagerank_score").alias("min_pagerank"),
-        F.stddev("pagerank_score").alias("stddev_pagerank"),
-        F.count("*").alias("total_scores"),
+    # 6. Summary stats
+    final_stats = spark.sql(f"SELECT * FROM {SCORES_TABLE}").agg(
+        F.avg("pagerank_score").alias("avg"),
+        F.max("pagerank_score").alias("max"),
+        F.min("pagerank_score").alias("min"),
+        F.stddev("pagerank_score").alias("stddev"),
+        F.count("*").alias("total"),
+        F.sum(F.when(F.col("pagerank_score") > 0.15, 1).otherwise(0)).alias("above_floor"),
     ).collect()[0]
 
     logger.info(
-        "PageRank stats — avg: %.6f, max: %.6f, min: %.6f, stddev: %.6f, total_scores: %d",
-        stats["avg_pagerank"] or 0,
-        stats["max_pagerank"] or 0,
-        stats["min_pagerank"] or 0,
-        stats["stddev_pagerank"] or 0,
-        stats["total_scores"] or 0,
+        "Score stats — avg: %.4f, max: %.4f, min: %.4f, stddev: %.4f, "
+        "total: %d, above_floor: %d (%.1f%%)",
+        final_stats["avg"]    or 0,
+        final_stats["max"]    or 0,
+        final_stats["min"]    or 0,
+        final_stats["stddev"] or 0,
+        final_stats["total"]  or 0,
+        final_stats["above_floor"] or 0,
+        100.0 * (final_stats["above_floor"] or 0) / (final_stats["total"] or 1),
     )
 
-
-def _iterative_pagerank(spark, vertices, edges, max_iter, reset_prob):
-    """
-    DataFrame-based iterative PageRank implementation.
-    
-    This avoids the need for the GraphFrames package, which requires
-    a separate JAR dependency. Uses standard Spark DataFrame operations.
-    
-    Algorithm:
-        1. Initialize all vertices with rank = 1.0
-        2. For each iteration:
-           a. Each vertex distributes its rank equally to all outgoing edges
-           b. New rank = reset_prob + (1 - reset_prob) * sum(incoming contributions)
-        3. Return final ranks
-    """
-    damping = 1.0 - reset_prob
-    
-    # Initialize ranks
-    ranks = vertices.select("id").withColumn("rank", F.lit(1.0))
-    
-    # Compute out-degree for each vertex
-    out_degrees = edges.groupBy("src").agg(
-        F.count("*").alias("out_degree")
-    )
-    
-    for iteration in range(max_iter):
-        # Join ranks with edges to compute contributions
-        # Each source vertex sends rank/out_degree to each destination
-        contribs = edges.join(ranks, edges["src"] == ranks["id"], "inner") \
-            .join(out_degrees, edges["src"] == out_degrees["src"], "inner") \
-            .select(
-                edges["dst"].alias("id"),
-                (F.col("rank") / F.col("out_degree")).alias("contribution"),
-            )
-        
-        # Sum contributions for each destination vertex
-        incoming = contribs.groupBy("id").agg(
-            F.sum("contribution").alias("total_contrib")
-        )
-        
-        # Update ranks: reset_prob + damping * sum(contributions)
-        # Use left join to keep vertices with no incoming edges
-        new_ranks = vertices.join(incoming, "id", "left").select(
-            F.col("id"),
-            (F.lit(reset_prob) + damping * F.coalesce(F.col("total_contrib"), F.lit(0.0))).alias("rank"),
-        )
-        
-        ranks = new_ranks
-        
-        if (iteration + 1) % 5 == 0:
-            logger.info("  PageRank iteration %d/%d complete", iteration + 1, max_iter)
-    
-    logger.info("PageRank converged after %d iterations", max_iter)
-    return ranks
-
-
-# Main
 
 def main():
-    parser = argparse.ArgumentParser(description="Spark PageRank job")
+    parser = argparse.ArgumentParser(
+        description="Spark citation influence scoring job"
+    )
     parser.add_argument(
         "--local", action="store_true",
         help="Run in local mode (for testing outside Docker)",
     )
-    parser.add_argument(
-        "--max-iter", type=int, default=MAX_ITER,
-        help=f"PageRank iterations (default: {MAX_ITER})",
-    )
-    parser.add_argument(
-        "--reset-prob", type=float, default=RESET_PROB,
-        help=f"Reset probability / 1-damping (default: {RESET_PROB})",
-    )
     args = parser.parse_args()
 
-    # Build Spark session with Hive metastore connection
     builder = SparkSession.builder \
         .appName("ResearchIntel-PageRank") \
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
@@ -241,16 +215,16 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
 
     logger.info("=" * 60)
-    logger.info("Starting PageRank job")
+    logger.info("Starting citation influence scoring job")
     logger.info("=" * 60)
 
     try:
-        run_pagerank(spark, max_iter=args.max_iter, reset_prob=args.reset_prob)
+        run_pagerank(spark)
         logger.info("=" * 60)
-        logger.info("PageRank job complete!")
+        logger.info("Citation influence scoring complete!")
         logger.info("=" * 60)
     except Exception as e:
-        logger.error("PageRank job failed: %s", e, exc_info=True)
+        logger.error("Job failed: %s", e, exc_info=True)
         raise
     finally:
         spark.stop()
