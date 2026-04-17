@@ -5,3 +5,6 @@ requests
 pandas
 pyarrow
 python-dotenv
+hdbscan
+numpy
+elasticsearch
