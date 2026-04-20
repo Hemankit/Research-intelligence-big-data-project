@@ -161,6 +161,8 @@ services:
     volumes:
       - ./pipelines:/opt/spark/work-dir/pipelines
       - ./ingestion:/opt/spark/work-dir/ingestion
+      - ./elasticsearch:/opt/spark/work-dir/elasticsearch
+      - ./NLP_layer:/opt/spark/work-dir/NLP_layer
 
   # Spark: Worker 
   spark-worker:
@@ -189,6 +191,8 @@ services:
     volumes:
       - ./pipelines:/opt/spark/work-dir/pipelines
       - ./ingestion:/opt/spark/work-dir/ingestion
+      - ./elasticsearch:/opt/spark/work-dir/elasticsearch
+      - ./NLP_layer:/opt/spark/work-dir/NLP_layer
 
   # Hive: Metastore database (PostgreSQL) 
   hive-metastore-db:

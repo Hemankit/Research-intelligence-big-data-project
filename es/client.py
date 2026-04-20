@@ -12,7 +12,7 @@ Reads connection parameters from environment variables by default so
 that credentials are never hardcoded. Supports both local development
 (no auth, single node) and production (basic auth or API key, cluster).
 
-Dependencies: elasticsearch-py
+Dependencies: elasticsearch-py >= 8.x
 """
 
 import os
@@ -60,13 +60,13 @@ class ESClient:
         timeout: int = 30,
         max_retries: int = 3,
     ):
-        self.host = host or os.getenv("ES_HOST", "http://localhost:9200")
-        self.username = username or os.getenv("ES_USERNAME")
-        self.password = password or os.getenv("ES_PASSWORD")
-        self.api_key = api_key or os.getenv("ES_API_KEY")
-        self.timeout = timeout
+        self.host        = host     or os.getenv("ES_HOST", "http://localhost:9200")
+        self.username    = username or os.getenv("ES_USERNAME")
+        self.password    = password or os.getenv("ES_PASSWORD")
+        self.api_key     = api_key  or os.getenv("ES_API_KEY")
+        self.timeout     = timeout
         self.max_retries = max_retries
-        self.client = None  # will be set after connect() is called
+        self.client      = None  # set after connect() is called
 
     def connect(self) -> None:
         """
@@ -81,19 +81,30 @@ class ESClient:
         ConnectionError
             If the cluster is unreachable after max_retries attempts.
         """
-        # build the Elasticsearch client with the provided parameters
+        # basic_auth replaces the deprecated http_auth parameter in ES 8.x
         client = Elasticsearch(
             hosts=[self.host],
-            http_auth=(self.username, self.password) if self.username and self.password else None,
+            basic_auth=(self.username, self.password) if self.username and self.password else None,
             api_key=self.api_key,
-            timeout=self.timeout,
+            request_timeout=self.timeout,
+            retry_on_timeout=True,
             max_retries=self.max_retries,
         )
-        # ping the cluster to verify connectivity
-        if not client.ping():
-            raise ConnectionError(f"Elasticsearch cluster at {self.host} is unreachable.")
+        # Use info() instead of ping() — ES 8.x returns HTTP 400 on HEAD /
+        # which causes ping() to return False even when the cluster is healthy.
+        try:
+            info = client.info()
+        except Exception as e:
+            raise ConnectionError(
+                f"Elasticsearch cluster at {self.host} is unreachable: {e}"
+            )
         self.client = client
-        logger.info(f"Connected to Elasticsearch cluster at {self.host}")
+        logger.info(
+            "Connected to Elasticsearch cluster '%s' version %s at %s",
+            info["cluster_name"],
+            info["version"]["number"],
+            self.host,
+        )
 
     def health(self) -> dict:
         """
@@ -110,16 +121,12 @@ class ESClient:
             ('green', 'yellow', 'red'), number_of_nodes, and
             active_shards.
         """
-        # call the cluster health API and return the response and wait 30 seconds for at least yellow status
         response = self.client.cluster.health(wait_for_status="yellow", timeout="30s")
         return response
 
     def index_exists(self, index_name: str) -> bool:
         """
         Return True if the specified index exists in the cluster.
-
-        Used by indexer.py to decide whether to create a new index
-        or update an existing one.
 
         Parameters
         ----------
@@ -138,8 +145,7 @@ class ESClient:
         Create an Elasticsearch index with the provided mapping.
 
         Only creates the index if it does not already exist. Logs
-        a warning and returns silently if the index is already present
-        rather than raising an error.
+        a warning and returns silently if the index is already present.
 
         Parameters
         ----------
@@ -151,16 +157,16 @@ class ESClient:
         """
         if not self.index_exists(index_name):
             self.client.indices.create(index=index_name, body=mapping)
-            logger.info(f"Created Elasticsearch index: {index_name}")
+            logger.info("Created Elasticsearch index: %s", index_name)
         else:
-            logger.warning(f"Elasticsearch index {index_name} already exists. Skipping creation.")
+            logger.warning("Index %s already exists — skipping creation.", index_name)
 
     def delete_index(self, index_name: str) -> None:
         """
         Delete an Elasticsearch index.
 
         Used during full reindexing to drop and recreate an index
-        with a fresh mapping. Logs a warning if the index does not exist.
+        with a fresh mapping.
 
         Parameters
         ----------
@@ -169,42 +175,45 @@ class ESClient:
         """
         if self.index_exists(index_name):
             self.client.indices.delete(index=index_name)
-            logger.info(f"Deleted Elasticsearch index: {index_name}")
+            logger.info("Deleted Elasticsearch index: %s", index_name)
         else:
-            logger.warning(f"Elasticsearch index {index_name} does not exist. Skipping deletion.")
+            logger.warning("Index %s does not exist — skipping deletion.", index_name)
 
     def bulk(self, actions: list[dict]) -> tuple[int, list]:
         """
         Execute a bulk indexing operation.
 
-        Wraps the elasticsearch-py helpers.bulk() call with error handling
-        and logging. Returns the number of successfully indexed documents
-        and a list of any failed actions.
+        Wraps the elasticsearch-py helpers.bulk() call with error
+        handling and logging.
 
         Parameters
         ----------
         actions : list[dict]
-            List of bulk action dicts in the format expected by
-            elasticsearch-py's helpers.bulk(), each containing
-            '_index', '_id', and '_source' keys.
+            List of bulk action dicts, each containing '_index',
+            '_id', and '_source' keys.
 
         Returns
         -------
         tuple[int, list]
-            (success_count, failed_actions) where success_count is the
-            number of documents successfully indexed and failed_actions
-            is a list of dicts describing any failures.
+            (success_count, failed_actions)
         """
-        # use the helpers.bulk() function to execute the bulk request and capture successes and failures
-        success_count, failed_actions = helpers.bulk(self.client, actions, stats_only=False, raise_on_error=False)
+        success_count, failed_actions = helpers.bulk(
+            self.client, actions,
+            stats_only=False,
+            raise_on_error=False,
+        )
+        if failed_actions:
+            logger.warning("%d documents failed to index.", len(failed_actions))
+            # Log first failure reason so we can diagnose mapping errors
+            if failed_actions:
+                first = failed_actions[0]
+                if isinstance(first, dict):
+                    logger.warning("First failure: %s", first)
         return success_count, failed_actions
 
     def get_document_count(self, index_name: str) -> int:
         """
         Return the number of documents currently in an index.
-
-        Useful for validating that indexing completed successfully
-        by comparing the Elasticsearch count to the Hive record count.
 
         Parameters
         ----------
@@ -218,8 +227,8 @@ class ESClient:
         """
         if self.index_exists(index_name):
             count = self.client.count(index=index_name)["count"]
-            logger.info(f"Index {index_name} contains {count} documents.")
+            logger.info("Index %s contains %d documents.", index_name, count)
             return count
         else:
-            logger.warning(f"Elasticsearch index {index_name} does not exist. Returning 0.")
+            logger.warning("Index %s does not exist — returning 0.", index_name)
             return 0

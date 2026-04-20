@@ -26,9 +26,30 @@ from datetime import datetime, timezone
 from pyhive import hive
 
 from .client import ESClient
-from .mappings import papers_mapping, fulltext_mapping, PAPERS_INDEX, FULLTEXT_INDEX
+from .mappings import (
+    papers_mapping,
+    fulltext_mapping,
+    PAPERS_INDEX,
+    FULLTEXT_INDEX,
+)
 
 logger = logging.getLogger(__name__)
+
+def _clean_datetime(value):
+    """Normalize datetime strings - strip timezone offset and microseconds."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:19]
+    if isinstance(value, str):
+        # Remove +00:00 timezone offset
+        v = value.replace("+00:00", "").replace("Z", "")
+        # Truncate microseconds (keep only up to seconds: 19 chars after T)
+        if "T" in v and len(v) > 19:
+            v = v[:19]
+        return v
+    return value
+
 
 HIVE_HOST = "localhost"
 HIVE_PORT = 10000
@@ -182,8 +203,7 @@ class PapersIndexer:
                 doc = dict(zip(columns, row))
                 # Convert date objects to ISO strings
                 for k, v in doc.items():
-                    if hasattr(v, "isoformat"):
-                        doc[k] = v.isoformat()
+                    doc[k] = _clean_datetime(v) if (hasattr(v, "isoformat") or (isinstance(v, str) and "T" in str(v) and ":" in str(v))) else v
                 actions.append({
                     "_index":  PAPERS_INDEX,
                     "_id":     doc["paper_id"],
@@ -330,7 +350,7 @@ class FulltextIndexer:
                         "doi":         doc.get("doi"),
                         "full_text":   doc.get("full_text"),
                         "sections":    sections,
-                        "ingested_at": doc.get("ingested_at"),
+                        "ingested_at": _clean_datetime(doc.get("ingested_at")),
                     },
                 })
             total_read    += len(actions)
