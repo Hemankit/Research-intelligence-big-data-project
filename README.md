@@ -50,7 +50,7 @@ docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
 |---|---|
 | HDFS NameNode UI | http://localhost:9870 |
 | Spark Master UI | http://localhost:8080 |
-| Airflow UI | http://localhost:8081 |
+| Airflow UI | http://localhost:8085 |
 | Hive | localhost:10000 |
 | Elasticsearch | http://localhost:9200 |
 | FastAPI | http://localhost:8000 |
@@ -419,3 +419,40 @@ FROM papers p
 JOIN paper_fulltext f ON p.paper_id = f.paper_id
 LIMIT 10;
 \`\`\`
+
+### 13. Elasticsearch Indexing
+
+# --- Prerequisites (one-time install) ---
+pip install "elasticsearch>=8.0.0,<9.0.0" pyhive thrift
+
+# --- Initial setup (run after spark_consolidate) ---
+
+# Full reindex of both indices
+python -m es.elasticsearch_run --mode full
+
+# Full reindex of papers index only
+python -m es.elasticsearch_run --mode full --index papers
+
+# Full reindex of fulltext index only
+python -m es.elasticsearch_run --mode full --index fulltext
+
+# --- Incremental update (run after each ingestion + consolidation cycle) ---
+
+python -m es.elasticsearch_run --mode incremental --year-month 2026-04
+
+# --- Verification ---
+
+# Check cluster health
+curl http://localhost:9200/_cluster/health?pretty
+
+# Count documents in each index
+curl http://localhost:9200/research_intel_papers/_count?pretty
+curl http://localhost:9200/research_intel_fulltext/_count?pretty
+
+# List all indices
+curl http://localhost:9200/_cat/indices?v
+
+# Test a search query
+curl -X GET "http://localhost:9200/research_intel_papers/_search?pretty" \
+  -H "Content-Type: application/json" \
+  -d '{"query": {"match": {"abstract": "large language models"}}, "size": 3, "_source": ["paper_id", "title", "topic_cluster"]}'
