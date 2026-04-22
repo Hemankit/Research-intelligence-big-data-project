@@ -1,5 +1,5 @@
 """
-run.py
+elasticsearch_run.py
 ------
 Entrypoint for the Elasticsearch indexing pipeline.
 
