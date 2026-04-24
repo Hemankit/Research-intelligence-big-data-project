@@ -31,6 +31,7 @@ import gzip
 import json
 import logging
 import os
+import re
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1186,9 +1187,39 @@ def enrich_papers(
     edges_written  = 0
 
     if all_papers:
-        hdfs.write_json(all_papers, source="s2orc", category=category)
-        papers_written = len(all_papers)
+        # Split fulltext records into separate HDFS path so consolidate_fulltext()
+        # picks them up automatically on the next spark_consolidate run.
+        arxiv_pattern = re.compile(r"^\d{4}\.\d{4,6}$")
+        fulltext_records = [
+            {
+                "paper_id":    p["paper_id"],
+                "arxiv_id":    p["paper_id"] if arxiv_pattern.match(str(p["paper_id"])) else None,
+                "corpusid":    None if arxiv_pattern.match(str(p["paper_id"])) else p["paper_id"],
+                "full_text":   p.get("full_text", ""),
+                "sections":    p.get("sections", []),
+                "doi":         p.get("doi", ""),
+                "ingested_at": p["ingested_at"],
+            }
+            for p in all_papers if p.get("full_text")
+        ]
+
+        # Strip full_text/sections from metadata records — those columns
+        # are not in the papers table schema and cause Spark schema errors.
+        metadata_records = [
+            {k: v for k, v in p.items() if k not in ("full_text", "sections")}
+            for p in all_papers
+        ]
+
+        hdfs.write_json(metadata_records, source="s2orc", category=category)
+        papers_written = len(metadata_records)
         logger.info("Wrote %d enriched paper records to HDFS", papers_written)
+
+        if fulltext_records:
+            hdfs.write_json(fulltext_records, source="s2orc", category="s2orc_fulltext")
+            logger.info(
+                "Wrote %d fulltext records to HDFS (s2orc_fulltext)",
+                len(fulltext_records)
+            )
 
     if all_edges:
         hdfs.write_json(all_edges, source="s2orc", category="edges")

@@ -29,8 +29,6 @@ import json
 import logging
 import os
 import time
-import redis
-
 logger = logging.getLogger(__name__)
 
 # Default TTL for cached results in seconds (6 hours)
@@ -72,7 +70,8 @@ class AnalysisCache:
       self._hit_count = 0
       self._miss_count = 0
       self._redis = None
-      if backend == "redis":    # was `redis.Redis.from_url(...)` inside get()
+      if backend == "redis":
+        import redis
         self._redis = redis.Redis.from_url(
             redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
         )

@@ -140,6 +140,8 @@ def score_recency(papers: list[dict], decay_days: int = 365) -> list[float]:
             continue
         try:
             pub_date = datetime.fromisoformat(date_str)
+            if pub_date.tzinfo is None:
+                pub_date = pub_date.replace(tzinfo=timezone.utc)
             days_old = (now - pub_date).days
             score = math.exp(-days_old / decay_days) if days_old >= 0 else 1.0
             scores.append(score)

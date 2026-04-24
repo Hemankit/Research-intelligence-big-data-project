@@ -128,11 +128,15 @@ def read_arxiv(spark: SparkSession) -> DataFrame:
 def read_s2orc(spark: SparkSession) -> DataFrame:
     """Read S2ORC JSONL (paper records, not edges) and normalize.
 
-    Reads only from s2orc_bulk/ — explicitly excludes s2orc_fulltext/
-    (handled separately by consolidate_fulltext) and edges/ (handled by
-    consolidate_edges) to avoid schema mismatches.
+    Reads from all s2orc/ subcategories so that records ingested under any
+    category name (s2orc_bulk, general, s2orc_fulltext_backfill, etc.) are
+    picked up automatically. Excludes:
+      - edges/        : citation edge records (different schema, handled by consolidate_edges)
+      - s2orc_fulltext: fulltext-only records (handled by consolidate_fulltext)
+    Edge records are identified by the presence of citing_id; fulltext-only
+    records are identified by having full_text but no title.
     """
-    path = f"{HDFS_BASE}/s2orc/s2orc_bulk/*/*"
+    path = f"{HDFS_BASE}/s2orc/*/*/*"
     logger.info("Reading S2ORC metadata from: %s", path)
 
     try:
@@ -147,6 +151,13 @@ def read_s2orc(spark: SparkSession) -> DataFrame:
     # Filter out edge records (they have citing_id/cited_id, not paper_id)
     if "citing_id" in df.columns:
         df = df.filter(F.col("citing_id").isNull())
+
+    # Filter out fulltext-only records (have full_text but no title)
+    # These belong in paper_fulltext, not papers
+    if "full_text" in df.columns:
+        df = df.filter(
+            F.col("full_text").isNull() | F.col("title").isNotNull()
+        )
 
     # S2ORC normalized fields from s2orc.py
     # Actual columns: abstract, authors, categories, citation_count, cited_id,
@@ -665,7 +676,7 @@ def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
     S2ORC-only papers with no arXiv ID — their paper_id is a numeric corpusid
     that doesn't exist in the papers table, making direct joins return zero rows.
     """
-    path = f"{HDFS_BASE}/s2orc/s2orc_fulltext/*/*"
+    path = f"{HDFS_BASE}/s2orc/*/*/*"
     logger.info("Reading S2ORC full-text records from: %s", path)
 
     try:
@@ -678,11 +689,22 @@ def read_s2orc_fulltext(spark: SparkSession) -> DataFrame:
         logger.info("S2ORC full-text path is empty — skipping.")
         return spark.createDataFrame([], FULLTEXT_SCHEMA)
 
+    # Exclude edge records (citing_id/cited_id schema, no full_text)
+    if "citing_id" in df.columns:
+        df = df.filter(F.col("citing_id").isNull())
+
     # Only keep records that actually have full_text content
-    if "full_text" in df.columns:
-        df = df.filter(
-            F.col("full_text").isNotNull() & (F.col("full_text") != "")
-        )
+    if "full_text" not in df.columns:
+        logger.info("No full_text column in S2ORC data — skipping fulltext consolidation.")
+        return spark.createDataFrame([], FULLTEXT_SCHEMA)
+
+    df = df.filter(
+        F.col("full_text").isNotNull() & (F.col("full_text") != "")
+    )
+
+    if df.rdd.isEmpty():
+        logger.info("No records with full_text content found — skipping.")
+        return spark.createDataFrame([], FULLTEXT_SCHEMA)
 
     # Extract arxiv_id from paper_id: arXiv IDs match NNNN.NNNNN format.
     # corpusid is the numeric S2ORC ID — store it for S2ORC-only papers.
