@@ -92,6 +92,29 @@ def run_trend_aggregation(spark: SparkSession) -> None:
     else:
         logger.info("No BERTopic data yet — aggregating by category + month only")
 
+    # 4b. Join citation edge counts from citation_edges table
+    logger.info("Computing citation counts from citation_edges table...")
+    try:
+        edges = spark.sql(f"""
+            SELECT cited_id, COUNT(*) as edge_citation_count
+            FROM {HIVE_DB}.citation_edges
+            GROUP BY cited_id
+        """)
+        papers_with_date = papers_with_date.join(
+            edges,
+            papers_with_date.paper_id == edges.cited_id,
+            how="left"
+        ).withColumn(
+            "citation_count",
+            F.coalesce(
+                F.col("edge_citation_count").cast(FloatType()),
+                F.col("citation_count").cast(FloatType())
+            )
+        ).drop("cited_id", "edge_citation_count")
+        logger.info("Citation edge counts joined successfully")
+    except Exception as e:
+        logger.warning("Could not join citation edge counts: %s", e)
+
     # 5. Aggregate by category + month 
     logger.info("Computing category-level trends...")
     category_trends = papers_with_date.groupBy(

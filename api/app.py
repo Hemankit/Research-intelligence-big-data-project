@@ -101,8 +101,6 @@ def get_es_client() -> Elasticsearch:
 
 # Module-level pipeline variable
 analysis_pipeline = None
-_cached_stats = None
-_stats_lock = threading.Lock()
 
 # App lifecycle 
 
@@ -447,27 +445,7 @@ def get_landscape(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Dashboard stats
-
-def get_cached_stats():
-    """Query corpus counts once and cache forever."""
-    global _cached_stats
-    if _cached_stats is not None:
-        return _cached_stats
-    with _stats_lock:
-        if _cached_stats is not None:
-            return _cached_stats
-        try:
-            papers   = query_hive("SELECT COUNT(*) as cnt FROM papers")[0]["cnt"]
-            edges    = query_hive("SELECT COUNT(*) as cnt FROM citation_edges")[0]["cnt"]
-            fulltext = query_hive("SELECT COUNT(*) as cnt FROM paper_fulltext")[0]["cnt"]
-            pagerank = query_hive("SELECT COUNT(*) as cnt FROM pagerank_scores")[0]["cnt"]
-            _cached_stats = {"papers": papers, "edges": edges, "fulltext": fulltext, "pagerank": pagerank}
-            logger.info("Stats cached: %s", _cached_stats)
-        except Exception as e:
-            logger.warning("Stats cache failed, using fallback: %s", e)
-            _cached_stats = {"papers": 23084, "edges": 114233, "fulltext": 495, "pagerank": 23084}
-        return _cached_stats 
+# Dashboard stats 
 
 @api.get("/stats")
 def get_stats():
@@ -491,25 +469,37 @@ def get_citations(
     Supports the citation graph visualization.
     """
     result = {"paper_id": paper_id}
-
     try:
+        # Get s2_paper_id for this paper (for S2ORC cross-reference)
+        s2_rows = query_hive(f"SELECT s2_paper_id FROM papers WHERE paper_id = '{_esc(paper_id)}' LIMIT 1")
+        s2_id = s2_rows[0]["s2_paper_id"] if s2_rows and s2_rows[0].get("s2_paper_id") else None
+
         if direction in ("cited_by", "both"):
+            ids = f"'{_esc(paper_id)}'"
+            if s2_id:
+                ids += f", '{_esc(s2_id)}'"
             sql = f"""
                 SELECT e.citing_id as paper_id, p.title, s.pagerank_score
                 FROM citation_edges e
                 LEFT JOIN papers p ON e.citing_id = p.paper_id
                 LEFT JOIN pagerank_scores s ON e.citing_id = s.paper_id
-                WHERE e.cited_id = '{_esc(paper_id)}'
+                WHERE e.cited_id IN ({ids})
                 LIMIT {limit}
             """
             result["cited_by"] = query_hive(sql)
 
         if direction in ("references", "both"):
             sql = f"""
-                SELECT e.cited_id as paper_id, p.title, s.pagerank_score
+                SELECT p.paper_id, p.title, s.pagerank_score
                 FROM citation_edges e
-                LEFT JOIN papers p ON e.cited_id = p.paper_id
-                LEFT JOIN pagerank_scores s ON e.cited_id = s.paper_id
+                JOIN papers p ON e.cited_id = p.paper_id
+                LEFT JOIN pagerank_scores s ON p.paper_id = s.paper_id
+                WHERE e.citing_id = '{_esc(paper_id)}'
+                UNION
+                SELECT p.paper_id, p.title, s.pagerank_score
+                FROM citation_edges e
+                JOIN papers p ON e.cited_id = p.s2_paper_id
+                LEFT JOIN pagerank_scores s ON p.paper_id = s.paper_id
                 WHERE e.citing_id = '{_esc(paper_id)}'
                 LIMIT {limit}
             """
@@ -704,60 +694,6 @@ def nl_query(body: dict):
     if analysis_pipeline is None:
         raise HTTPException(status_code=503, detail="Analysis pipeline not ready")
     return run_analysis(query=query, pipeline=analysis_pipeline)
-
-
-@api.get("/entities/trending/es")
-def get_trending_entities_es(
-    type: str = Query("method", description="method, dataset, or task"),
-    limit: int = Query(15, ge=1, le=50),
-):
-    """Return trending NER entities using ES scroll with wildcard query."""
-    field_map = {"method": "methods", "dataset": "datasets", "task": "tasks"}
-    field = field_map.get(type, "methods")
-    try:
-        from collections import Counter
-        import json as _json
-        counter = Counter()
-        es_client = get_es_client()
-        after_key = None
-        pages = 0
-        while pages < 30:
-            body = {
-                "size": 1000,
-                "_source": [field, "paper_id"],
-                "query": {"wildcard": {field: {"value": "*\\\"*"}}},
-                "sort": [{"paper_id": "asc"}]
-            }
-            if after_key:
-                body["search_after"] = [after_key]
-            resp = es_client.search(index=ES_INDEX, **body)
-            current_hits = resp["hits"]["hits"]
-            if not current_hits:
-                break
-            for hit in current_hits:
-                val = hit["_source"].get(field, "[]")
-                try:
-                    items = _json.loads(val) if isinstance(val, str) else val
-                    if isinstance(items, list):
-                        for item in items:
-                            item = str(item).strip()
-                            STOP = {"pad","me","ra","mi","pa","op","cha","ar","co","na","re","ll","lo","ld","ec","the","and","for","its","via","not","are","was","one","two","use","new","all","our","how","may","but","mor","bas","pro","com","res","pre","tra","inp","out","mod","dat","app","sys"}
-                            if item and len(item) > 2 and item.lower() not in STOP and not item.lower().startswith("pad"):
-                                counter[item] += 1
-                except Exception:
-                    pass
-            after_key = current_hits[-1]["_source"].get("paper_id")
-            if not after_key:
-                break
-            pages += 1
-            if len(current_hits) < 1000:
-                break
-        top = counter.most_common(limit)
-        results = [{"entity": e, "paper_count": c} for e, c in top]
-        return {"count": len(results), "type": type, "entities": results}
-    except Exception as e:
-        logger.error("ES entities trending failed: %s", e)
-        return {"count": 0, "type": type, "entities": []}
 
 
 # Include the api router

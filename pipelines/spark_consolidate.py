@@ -66,6 +66,7 @@ UNIFIED_SCHEMA = StructType([
     StructField("influential_citation_count", IntegerType(), True),
     StructField("source",              StringType(), True),
     StructField("ingested_at",         StringType(), True),
+    StructField("s2_paper_id",         StringType(), True),
 ])
 
 # Schema for the separate paper_fulltext table (Option B).
@@ -122,6 +123,7 @@ def read_arxiv(spark: SparkSession) -> DataFrame:
         F.lit(None).cast(IntegerType()).alias("influential_citation_count"),
         F.lit("arxiv").alias("source"),
         F.col("ingested_at"),
+        F.lit(None).cast("string").alias("s2_paper_id"),
     )
 
 
@@ -177,6 +179,7 @@ def read_s2orc(spark: SparkSession) -> DataFrame:
         F.lit(None).cast(IntegerType()).alias("influential_citation_count"),
         F.lit("s2orc").alias("source"),
         F.col("ingested_at"),
+        F.col("s2_paper_id") if "s2_paper_id" in df.columns else F.lit(None).cast("string").alias("s2_paper_id"),
     )
 
 
@@ -243,7 +246,7 @@ def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFra
     merge_cols = [
         "title", "abstract", "authors", "submitted_date", "updated_date",
         "primary_category", "categories", "citation_count", "reference_count",
-        "influential_citation_count", "source", "ingested_at",
+        "influential_citation_count", "source", "ingested_at", "s2_paper_id",
     ]
 
     # For each paper_id, take the first non-null value per column
@@ -270,6 +273,7 @@ def merge_sources(arxiv_df: DataFrame, s2orc_df: DataFrame, openalex_df: DataFra
         F.max("influential_citation_count").alias("influential_citation_count"),
         F.first("source", ignorenulls=True).alias("source"),
         F.min("ingested_at").alias("ingested_at"),  # earliest ingestion time
+        F.first("s2_paper_id", ignorenulls=True).alias("s2_paper_id"),
     )
 
     logger.info("Merged records after dedup: %d", merged.count())
@@ -315,6 +319,7 @@ def prepare_for_hive(df: DataFrame) -> DataFrame:
         # Metadata
         F.col("source"),
         F.to_timestamp(F.col("ingested_at")).alias("ingested_at"),
+        F.col("s2_paper_id"),
 
         # Partition key: YYYY-MM from submitted_date
         F.coalesce(

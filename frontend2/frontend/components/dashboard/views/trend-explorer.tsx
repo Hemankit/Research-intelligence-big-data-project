@@ -42,7 +42,7 @@ export function TrendExplorerView() {
           }
         })
         const citData = Object.entries(catMap)
-          .map(([category, v]) => ({ category, count: Math.round(v.total / v.rows) }))
+          .map(([category, v]) => ({ category, count: parseFloat((v.total / v.rows).toFixed(2)) }))
           .sort((a, b) => b.count - a.count)
           .slice(0, 5)
         setCitationData(citData)
@@ -117,7 +117,7 @@ export function TrendExplorerView() {
 
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-lg bg-card p-5">
-          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Avg Citation Count by Category</h3>
+          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Avg Citation Count by Category (from arXiv papers)</h3>
           {citationData.length > 0 ? (
             <ul className="space-y-4">
               {citationData.map((item) => (
@@ -141,15 +141,13 @@ export function TrendExplorerView() {
         </div>
 
         <div className="rounded-lg bg-card p-5">
-          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Top Categories by Volume</h3>
+          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Top Categories by Volume (from arXiv papers)</h3>
           {citationData.length > 0 ? (
             <ul className="space-y-3">
               {citationData.map((item) => (
                 <li key={item.category} className="flex items-center justify-between">
                   <span className="text-sm font-medium text-card-foreground">{item.category}</span>
-                  <span className="rounded bg-[#1D9E75]/20 px-2 py-0.5 text-xs font-medium text-[#1D9E75]">
-                    {item.count} avg citations
-                  </span>
+                  <span className="text-sm font-medium text-primary">{item.count.toFixed(1)} Avg citations</span>
                 </li>
               ))}
             </ul>

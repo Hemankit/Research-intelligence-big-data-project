@@ -326,7 +326,8 @@ Serves analytics queries from Hive and Elasticsearch to the React dashboard.
 pip install fastapi uvicorn pyhive thrift elasticsearch
 
 # Run locally (connects to Docker services on localhost)
-python -m uvicorn api.app:app --reload --port 8000
+export HF_HUB_OFFLINE=1
+python -m uvicorn api.app:app --port 8000
 \`\`\`
 
 **Endpoints:**
