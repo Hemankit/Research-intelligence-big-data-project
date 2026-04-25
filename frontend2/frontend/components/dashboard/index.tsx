@@ -8,6 +8,8 @@ import { TopicLandscapeView } from "./views/topic-landscape"
 import { KnowledgeTableView } from "./views/knowledge-table"
 import { PaperDetailView } from "./views/paper-detail"
 import { GraphStatsView } from "./views/graph-stats"
+import { IngestionLogView } from "./views/ingestion-log"
+import { NERPipelineView } from "./views/ner-pipeline"
 
 export function Dashboard() {
   const [activeView, setActiveView] = useState("overview")
@@ -35,8 +37,12 @@ export function Dashboard() {
         return <TopicLandscapeView />
       case "table":
         return <KnowledgeTableView onPaperClick={handlePaperClick} />
+      case "ingestion":
+        return <IngestionLogView />
       case "graph":
         return <GraphStatsView />
+      case "ner":
+      return <NERPipelineView />
       default:
         return (
           <div className="flex h-[400px] items-center justify-center rounded-lg bg-card">

@@ -711,42 +711,46 @@ def get_trending_entities_es(
     type: str = Query("method", description="method, dataset, or task"),
     limit: int = Query(15, ge=1, le=50),
 ):
-    """Return trending NER entities using ES scroll — no MapReduce."""
+    """Return trending NER entities using ES scroll with wildcard query."""
     field_map = {"method": "methods", "dataset": "datasets", "task": "tasks"}
     field = field_map.get(type, "methods")
     try:
         from collections import Counter
         import json as _json
         counter = Counter()
-        body = {
-            "size": 1000,
-            "_source": [field],
-            "query": {"exists": {"field": field}},
-            "sort": [{"_id": "asc"}]
-        }
+        es_client = get_es_client()
         after_key = None
         pages = 0
         while pages < 30:
+            body = {
+                "size": 1000,
+                "_source": [field, "paper_id"],
+                "query": {"wildcard": {field: {"value": "*\\\"*"}}},
+                "sort": [{"paper_id": "asc"}]
+            }
             if after_key:
                 body["search_after"] = [after_key]
-            resp = es.search(index=ES_INDEX, **body)
-            hits = resp["hits"]["hits"]
-            if not hits:
+            resp = es_client.search(index=ES_INDEX, **body)
+            current_hits = resp["hits"]["hits"]
+            if not current_hits:
                 break
-            for hit in hits:
+            for hit in current_hits:
                 val = hit["_source"].get(field, "[]")
                 try:
                     items = _json.loads(val) if isinstance(val, str) else val
                     if isinstance(items, list):
                         for item in items:
                             item = str(item).strip()
-                            if item and len(item) > 1:
+                            STOP = {"pad","me","ra","mi","pa","op","cha","ar","co","na","re","ll","lo","ld","ec","the","and","for","its","via","not","are","was","one","two","use","new","all","our","how","may","but","mor","bas","pro","com","res","pre","tra","inp","out","mod","dat","app","sys"}
+                            if item and len(item) > 2 and item.lower() not in STOP and not item.lower().startswith("pad"):
                                 counter[item] += 1
                 except Exception:
                     pass
-            after_key = hits[-1]["_id"]
+            after_key = current_hits[-1]["_source"].get("paper_id")
+            if not after_key:
+                break
             pages += 1
-            if len(hits) < 1000:
+            if len(current_hits) < 1000:
                 break
         top = counter.most_common(limit)
         results = [{"entity": e, "paper_count": c} for e, c in top]
