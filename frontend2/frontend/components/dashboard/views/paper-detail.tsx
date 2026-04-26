@@ -22,6 +22,7 @@ export function PaperDetailView({ paperId, onBack }: PaperDetailProps) {
   const [citations, setCitations] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [relatedPapers, setRelatedPapers] = useState<any[]>([])
 
   useEffect(() => {
     setLoading(true)
@@ -35,6 +36,21 @@ export function PaperDetailView({ paperId, onBack }: PaperDetailProps) {
       .finally(() => setLoading(false))
   }, [paperId])
 
+  useEffect(() => {
+  if (!paper?.topic_cluster || paper.topic_cluster === "outlier") {
+    setRelatedPapers([])
+    return
+  }
+  const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+  fetch(`${BASE}/api/papers/search?q=${encodeURIComponent(paper.topic_cluster)}&size=6`)
+    .then(r => r.json())
+    .then(d => {
+      const others = (d.papers ?? []).filter((p: any) => p.paper_id !== paperId)
+      setRelatedPapers(others.slice(0, 4))
+    })
+    .catch(() => {})
+}, [paper?.topic_cluster, paperId])
+
   if (loading) {
     return (
       <div className="flex h-[400px] items-center justify-center rounded-lg bg-card">
@@ -42,6 +58,8 @@ export function PaperDetailView({ paperId, onBack }: PaperDetailProps) {
       </div>
     )
   }
+
+  
 
   if (error || !paper) {
     return (
@@ -260,8 +278,20 @@ const datasets = parseArray(paper.datasets)
                 </li>
               ))}
             </ul>
+          ) : relatedPapers.length > 0 ? (
+            <ul className="space-y-4">
+              {relatedPapers.map((p: any, i: number) => (
+                <li key={p.paper_id ?? i} className="space-y-1">
+                  <p className="text-sm font-medium text-card-foreground">{p.title || p.paper_id}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {p.primary_category && <span className="text-primary mr-2">{p.primary_category}</span>}
+                    {p.pagerank_score != null && <>PageRank: <span className="text-primary">{p.pagerank_score.toFixed(2)}</span></>}
+                  </p>
+                </li>
+              ))}
+            </ul>
           ) : (
-            <p className="text-sm text-muted-foreground">No citing papers found in corpus.</p>
+            <p className="text-sm text-muted-foreground">No related papers found.</p>
           )}
         </div>
       </div>
