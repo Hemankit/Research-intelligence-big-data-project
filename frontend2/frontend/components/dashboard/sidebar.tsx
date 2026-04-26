@@ -13,6 +13,7 @@ const mainNavItems = [
   { id: "trends", label: "Trend Explorer", icon: TrendingUp },
   { id: "topics", label: "Topic Landscape", icon: ScatterChart },
   { id: "table", label: "Knowledge Table", icon: Table },
+  { id: "reading", label: "Reading Path", icon: BookOpen },
 ]
 
 const dataNavItems = [

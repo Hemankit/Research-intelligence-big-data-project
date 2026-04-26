@@ -510,7 +510,7 @@ def get_citations(
         logger.error("Citations query failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/analyze")
+@api.get("/analyze")
 async def analyze(q: str):
     global analysis_pipeline
     if analysis_pipeline is None:
@@ -519,7 +519,7 @@ async def analyze(q: str):
     return run_analysis(query=q, pipeline=analysis_pipeline)
 
 
-@app.get("/analyze/fresh")
+@api.get("/analyze/fresh")
 async def analyze_fresh(q: str):
     global analysis_pipeline
     if analysis_pipeline is None:
@@ -605,6 +605,60 @@ def get_trending_entities(
         return {"count": len(results), "type": type, "entities": results}
     except Exception as e:
         logger.error("Entities trending query failed: %s", e)
+        return {"count": 0, "type": type, "entities": []}
+    
+
+@api.get("/entities/trending/es")
+def get_trending_entities_es(
+    type: str = Query("method", description="method, dataset, or task"),
+    limit: int = Query(15, ge=1, le=50),
+):
+    """Return trending NER entities using ES scroll with wildcard query."""
+    field_map = {"method": "methods", "dataset": "datasets", "task": "tasks"}
+    field = field_map.get(type, "methods")
+    try:
+        from collections import Counter
+        import json as _json
+        counter = Counter()
+        es_client = get_es_client()
+        after_key = None
+        pages = 0
+        while pages < 30:
+            body = {
+                "size": 1000,
+                "_source": [field, "paper_id"],
+                "query": {"wildcard": {field: {"value": "*\\\"*"}}},
+                "sort": [{"paper_id": "asc"}]
+            }
+            if after_key:
+                body["search_after"] = [after_key]
+            resp = es_client.search(index=ES_INDEX, **body)
+            current_hits = resp["hits"]["hits"]
+            if not current_hits:
+                break
+            for hit in current_hits:
+                val = hit["_source"].get(field, "[]")
+                try:
+                    items = _json.loads(val) if isinstance(val, str) else val
+                    if isinstance(items, list):
+                        for item in items:
+                            item = str(item).strip()
+                            STOP = {"pad","me","ra","mi","pa","op","cha","ar","co","na","re","ll","lo","ld","ec","the","and","for","its","via","not","are","was","one","two","use","new","all","our","how","may","but","mor","bas","pro","com","res","pre","tra","inp","out","mod","dat","app","sys"}
+                            if item and len(item) > 2 and item.lower() not in STOP and not item.lower().startswith("pad"):
+                                counter[item] += 1
+                except Exception:
+                    pass
+            after_key = current_hits[-1]["_source"].get("paper_id")
+            if not after_key:
+                break
+            pages += 1
+            if len(current_hits) < 1000:
+                break
+        top = counter.most_common(limit)
+        results = [{"entity": e, "paper_count": c} for e, c in top]
+        return {"count": len(results), "type": type, "entities": results}
+    except Exception as e:
+        logger.error("ES entities trending failed: %s", e)
         return {"count": 0, "type": type, "entities": []}
 
 

@@ -203,7 +203,7 @@ class PapersIndexer:
                 doc = dict(zip(columns, row))
                 # Convert date objects to ISO strings
                 for k, v in doc.items():
-                    doc[k] = _clean_datetime(v) if (hasattr(v, "isoformat") or (isinstance(v, str) and "T" in str(v) and ":" in str(v))) else v
+                    doc[k] = _clean_datetime(v) if (hasattr(v, "isoformat") or (isinstance(v, str) and "T" in str(v) and ":" in str(v) and len(v) <= 30)) else v
                 actions.append({
                     "_index":  PAPERS_INDEX,
                     "_id":     doc["paper_id"],

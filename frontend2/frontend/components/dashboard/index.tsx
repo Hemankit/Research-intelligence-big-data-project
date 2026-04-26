@@ -10,6 +10,7 @@ import { PaperDetailView } from "./views/paper-detail"
 import { GraphStatsView } from "./views/graph-stats"
 import { IngestionLogView } from "./views/ingestion-log"
 import { NERPipelineView } from "./views/ner-pipeline"
+import { ReadingPathView } from "./views/reading-path"
 
 export function Dashboard() {
   const [activeView, setActiveView] = useState("overview")
@@ -41,6 +42,8 @@ export function Dashboard() {
         return <IngestionLogView />
       case "graph":
         return <GraphStatsView />
+      case "reading":
+        return <ReadingPathView />
       case "ner":
       return <NERPipelineView />
       default:
