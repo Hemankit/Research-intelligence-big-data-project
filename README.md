@@ -45,6 +45,9 @@ docker compose down -v
 docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
 \`\`\`
 
+# One-time setup for all required models; run before first use
+python scripts/download_models.py
+
 **Localhost ports:**
 | Service | URL |
 |---|---|
