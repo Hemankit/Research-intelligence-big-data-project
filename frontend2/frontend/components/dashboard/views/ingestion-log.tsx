@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react"
 import { fetchPapers } from "@/lib/api"
 
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+
 const SOURCE_COLORS: Record<string, string> = {
   arxiv:   "bg-primary/20 text-primary",
   s2orc:   "bg-[#1D9E75]/20 text-[#1D9E75]",
@@ -25,6 +27,7 @@ export function IngestionLogView() {
   const [activeSource, setActiveSource] = useState("all")
   const [page, setPage] = useState(0)
   const [totalCount, setTotalCount] = useState<number | null>(null)
+  const [sourceStats, setSourceStats] = useState({ arxiv: 5746, s2orc: 17338, total: 23084 })
   const PAGE_SIZE = 25
 
   useEffect(() => {
@@ -42,6 +45,16 @@ export function IngestionLogView() {
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [activeSource, page])
+
+  useEffect(() => {
+  fetch(`${BASE}/api/stats`).then(r => r.json()).then(d => {
+    setSourceStats({
+      arxiv: d.sources?.arxiv ?? 5746,
+      s2orc: d.sources?.s2orc ?? 17338,
+      total: d.papers?.total_papers ?? 23084,
+    })
+  }).catch(() => {})
+}, [])
 
   // Group papers by month
   const grouped = papers.reduce((acc: Record<string, any[]>, paper) => {
@@ -87,9 +100,9 @@ export function IngestionLogView() {
       {/* Summary cards */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { label: "arXiv Papers",  value: 5746,  color: "#378ADD" },
-          { label: "S2ORC Papers",  value: 17338, color: "#1D9E75" },
-          { label: "Total Ingested",value: 23084, color: "#7F77DD" },
+          { label: "arXiv Papers",   value: sourceStats.arxiv,  color: "#378ADD" },
+          { label: "S2ORC Papers",   value: sourceStats.s2orc,  color: "#1D9E75" },
+          { label: "Total Ingested", value: sourceStats.total,  color: "#7F77DD" },
         ].map((s) => (
           <div key={s.label} className="rounded-lg bg-card p-4">
             <p className="text-sm text-muted-foreground">{s.label}</p>

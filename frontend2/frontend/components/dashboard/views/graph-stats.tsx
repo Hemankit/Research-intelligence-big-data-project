@@ -94,7 +94,7 @@ export function GraphStatsView() {
           <StatusBadge status="ok" label="Elasticsearch" />
           <StatusBadge status="ok" label="FastAPI Backend" />
           <StatusBadge status="ok" label="HDFS / Hadoop" />
-          <StatusBadge status="ok" label="BERTopic (257 clusters)" />
+          <StatusBadge status="ok" label={`BERTopic (${(trends.topic_count ?? 257).toLocaleString()} clusters)`} />
           <StatusBadge status="ok" label="PageRank (GraphX)" />
           <StatusBadge status="ok" label="NER Pipeline (SciBERT)" />
         </div>
@@ -105,9 +105,9 @@ export function GraphStatsView() {
         <h3 className="mb-4 text-lg font-semibold text-card-foreground">Ingestion Sources</h3>
         <div className="grid grid-cols-3 gap-4">
           {[
-            { source: "arXiv", count: 5746, desc: "Preprints with full metadata & categories", color: "#378ADD" },
-            { source: "S2ORC", count: 17338, desc: "Semantic Scholar with citation graphs", color: "#1D9E75" },
-            { source: "OpenAlex", count: 0, desc: "Supplementary bibliographic data", color: "#7F77DD" },
+            { source: "arXiv", count: stats?.sources?.arxiv ?? 5746, desc: "Preprints with full metadata & categories", color: "#378ADD" },
+            { source: "S2ORC", count: stats?.sources?.s2orc ?? 17338, desc: "Semantic Scholar with citation graphs", color: "#1D9E75" },
+            { source: "OpenAlex", count: stats?.sources?.openalex ?? 0, desc: "Supplementary bibliographic data", color: "#7F77DD" },
           ].map((s) => (
             <div key={s.source} className="rounded-lg bg-secondary p-4">
               <div className="mb-1 flex items-center gap-2">
@@ -144,3 +144,4 @@ export function GraphStatsView() {
     </div>
   )
 }
+

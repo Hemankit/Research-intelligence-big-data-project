@@ -63,6 +63,7 @@ export function NERPipelineView() {
   const [datasets, setDatasets] = useState<any[]>([])
   const [tasks,    setTasks]    = useState<any[]>([])
   const [loading,  setLoading]  = useState(true)
+  const [stats, setStats] = useState<any>(null)
 
   useEffect(() => {
     setLoading(true)
@@ -70,6 +71,7 @@ export function NERPipelineView() {
       fetchEntities("method",  15),
       fetchEntities("dataset", 12),
       fetchEntities("task",    12),
+      fetch(`${BASE}/api/stats`).then(r => r.json()).then(setStats).catch(() => {})
     ]).then(([m, d, t]) => {
       setMethods(m)
       setDatasets(d)
@@ -90,7 +92,7 @@ export function NERPipelineView() {
       {/* Pipeline info cards */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { label: "Papers Processed", value: "5,602", sub: "arXiv papers with NER data", color: "#378ADD" },
+          { label: "Papers Processed", value: stats?.ner?.ner_papers?.toLocaleString() ?? "...", sub: "arXiv papers with NER data", color: "#378ADD" },
           { label: "NER Model",        value: "SciBERT", sub: "allenai/scibert_scivocab_uncased", color: "#7F77DD" },
           { label: "Entity Types",     value: "3",     sub: "Methods, Datasets, Tasks", color: "#1D9E75" },
         ].map((s) => (
@@ -131,6 +133,18 @@ export function NERPipelineView() {
           ))}
         </div>
       </div>
+
+      {/* Notes Panel */}
+    <div className="rounded-lg bg-card p-5">
+      <h3 className="mb-2 text-base font-semibold text-card-foreground">Important Notes</h3>
+      <p className="text-sm text-muted-foreground">
+        Dataset extraction was attempted via full-text NER on 495 S2ORC papers but yielded 
+        0 identified datasets. Dataset names (e.g. ImageNet, SQuAD, COCO) do not conform 
+        to standard NER entity patterns, and the current model lacks the domain-specific 
+        vocabulary to distinguish them from other proper nouns in scientific text. 
+        This is identified as future work.
+        </p>
+    </div>
 
       {/* Entity lists */}
       <div className="grid grid-cols-3 gap-4">
