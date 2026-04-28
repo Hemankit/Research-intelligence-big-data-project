@@ -470,7 +470,9 @@ def get_cached_stats():
             ner_rows = query_hive("""
                 SELECT COUNT(*) as ner_papers
                 FROM papers
-                WHERE methods IS NOT NULL AND size(methods) > 0
+                WHERE CAST(methods AS STRING) IS NOT NULL 
+                AND CAST(methods AS STRING) != 'null'
+                AND CAST(methods AS STRING) != '[]'
             """)
             _cached_stats = {
                 "papers": {
@@ -784,10 +786,10 @@ def get_pipeline_status():
             "analysis_pipeline": "ready" if analysis_pipeline else "not_ready",
         },
         "counts": {
-            "papers": 23084,
-            "citation_edges": 114233,
+            "papers": get_cached_stats()["papers"]["total_papers"],
+            "citation_edges": get_cached_stats()["citations"]["total_edges"],
             "fulltext_papers": 495,
-            "pagerank_scores": 23084,
+            "pagerank_scores": get_cached_stats()["pagerank"]["scored_papers"],
         }
     }
 
