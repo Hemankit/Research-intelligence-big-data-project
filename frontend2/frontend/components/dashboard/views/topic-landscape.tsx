@@ -13,14 +13,36 @@ export function TopicLandscapeView() {
   const [loading, setLoading] = useState(true)
   const [activeCluster, setActiveCluster] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
+  const [pointLimit, setPointLimit] = useState(3000)
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number; title: string } | null>(null)
+  const [matchedIds, setMatchedIds] = useState<Set<string> | null>(null)
+  const [searching, setSearching] = useState(false)
 
   useEffect(() => {
-    fetchLandscape(3000)
-      .then((data) => setPoints(data.points || []))
-      .catch(console.error)
-      .finally(() => setLoading(false))
-  }, [])
+  setLoading(true)
+  fetchLandscape(pointLimit)
+    .then((data) => setPoints(data.points || []))
+    .catch(console.error)
+    .finally(() => setLoading(false))
+}, [pointLimit])
+
+  // ES semantic search with debounce
+  useEffect(() => {
+    if (!searchQuery.trim()) { setMatchedIds(null); return }
+    const timer = setTimeout(() => {
+      setSearching(true)
+      const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+      fetch(`${BASE}/api/papers/search?q=${encodeURIComponent(searchQuery)}&size=500`)
+        .then(r => r.json())
+        .then(d => {
+          const ids = new Set<string>((d.papers ?? []).map((p: any) => p.paper_id))
+          setMatchedIds(ids)
+        })
+        .catch(() => setMatchedIds(null))
+        .finally(() => setSearching(false))
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
 
   // Normalize umap_x and umap_y to SVG viewBox (0-700 x 0-450)
   const normalizedPoints = useMemo(() => {
@@ -54,17 +76,13 @@ export function TopicLandscapeView() {
   }, [points])
 
   const visiblePoints = useMemo(() => {
-  let filtered = activeCluster === null ? normalizedPoints
-    : normalizedPoints.filter(p => p.topic_cluster_id === activeCluster)
-  if (searchQuery.trim()) {
-    const q = searchQuery.toLowerCase()
-    filtered = filtered.filter(p =>
-      p.title?.toLowerCase().includes(q) ||
-      p.topic_cluster?.toLowerCase().includes(q)
-    )
-  }
-  return filtered
-}, [normalizedPoints, activeCluster, searchQuery])
+    let filtered = activeCluster === null ? normalizedPoints
+      : normalizedPoints.filter(p => p.topic_cluster_id === activeCluster)
+    if (matchedIds !== null) {
+      filtered = filtered.filter(p => matchedIds.has(p.paper_id))
+    }
+    return filtered
+  }, [normalizedPoints, activeCluster, matchedIds])
 
   const getColor = (clusterId: number) => {
     if (clusterId === -1) return "#4B5563"
@@ -90,32 +108,60 @@ export function TopicLandscapeView() {
           </div>
         ) : (
           <div className="relative">
-            <div className="mb-3 relative">
-            <input
-              type="text"
-              placeholder="Search papers by title or topic..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg bg-secondary px-4 py-2 text-sm text-card-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-            />
-            {searchQuery && (
-              <button 
-                onClick={() => setSearchQuery("")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
-              >
-                ✕
-              </button>
+            {pointLimit > 5000 && (
+              <p className="text-xs text-[#BA7517] mb-2">
+                ⚠ High point counts may slow rendering
+              </p>
             )}
-          </div>
+            <div className="mb-3 flex items-center gap-4">
+              <span className="text-xs text-muted-foreground shrink-0">Points:</span>
+              <input
+                type="range"
+                min={500}
+                max={20000}
+                step={500}
+                value={pointLimit}
+                onChange={(e) => setPointLimit(Number(e.target.value))}
+                className="flex-1 accent-primary"
+              />
+              <span className="text-xs font-medium text-primary w-16 text-right">
+                {pointLimit.toLocaleString()}
+              </span>
+            </div>
+            <div className="mb-3 relative">
+              <input
+                type="text"
+                placeholder="Search papers semantically (e.g. transformer attention mechanism)..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full rounded-lg bg-secondary px-4 py-2 text-sm text-card-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary pr-16"
+              />
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                {searching && <span className="text-xs text-muted-foreground animate-pulse">Searching...</span>}
+                {searchQuery && !searching && (
+                  <button
+                    onClick={() => { setSearchQuery(""); setMatchedIds(null); }}
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              {matchedIds !== null && (
+                <p className="mt-1 text-xs text-primary">
+                  {matchedIds.size} papers matched — showing their positions on the map
+                </p>
+              )}
+            </div>
             <svg viewBox="0 0 700 450" className="h-[450px] w-full">
               {visiblePoints.map((point, index) => (
                 <circle
                   key={point.paper_id ?? index}
                   cx={point.svgX}
                   cy={point.svgY}
-                  r={5}
+                  r={matchedIds !== null ? 7 : 5}
                   fill={getColor(point.topic_cluster_id ?? -1)}
-                  opacity={0.7}
+                  opacity={matchedIds !== null ? 1.0 : 0.7}
                   className="cursor-pointer transition-all hover:opacity-100"
                   onMouseEnter={() =>
                     setHoveredPoint({ x: point.svgX, y: point.svgY, title: point.title || point.paper_id })
