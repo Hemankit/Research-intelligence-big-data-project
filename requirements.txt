@@ -1,11 +1,44 @@
+# Core data & storage
 boto3
 tqdm
-arxiv
 requests
 pandas
 pyarrow
-python-dotenv
-hdbscan
 numpy
-elasticsearch
+python-dotenv
+
+# Ingestion
+arxiv
+
+# Spark / Hive connectivity
+pyhive[hive]
+thrift
+thrift-sasl
+pure-sasl
+
+# Elasticsearch (must match ES server 8.x — do NOT upgrade to 9.x)
+elasticsearch>=8.0.0,<9.0.0
+
+# FastAPI backend
+fastapi
 uvicorn
+httpx
+
+# NLP/NER
+transformers
+torch
+spacy
+
+# NLP: BERTopic + embeddings
+bertopic
+sentence-transformers
+umap-learn
+hdbscan
+scikit-learn
+joblib
+
+# Selective analysis (SciBERT)
+# allenai/scibert_scivocab_cased is loaded via transformers, no extra install needed
+
+# Utilities
+python-multipart
