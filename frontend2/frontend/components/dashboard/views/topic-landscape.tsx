@@ -11,6 +11,8 @@ const CLUSTER_COLORS = [
 export function TopicLandscapeView() {
   const [points, setPoints] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [activeCluster, setActiveCluster] = useState<number | null>(null)
+  const [searchQuery, setSearchQuery] = useState("")
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number; title: string } | null>(null)
 
   useEffect(() => {
@@ -51,10 +53,25 @@ export function TopicLandscapeView() {
       .map(([id, name]) => ({ id, name, color: CLUSTER_COLORS[id % CLUSTER_COLORS.length] }))
   }, [points])
 
+  const visiblePoints = useMemo(() => {
+  let filtered = activeCluster === null ? normalizedPoints
+    : normalizedPoints.filter(p => p.topic_cluster_id === activeCluster)
+  if (searchQuery.trim()) {
+    const q = searchQuery.toLowerCase()
+    filtered = filtered.filter(p =>
+      p.title?.toLowerCase().includes(q) ||
+      p.topic_cluster?.toLowerCase().includes(q)
+    )
+  }
+  return filtered
+}, [normalizedPoints, activeCluster, searchQuery])
+
   const getColor = (clusterId: number) => {
     if (clusterId === -1) return "#4B5563"
     return CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length]
   }
+
+  
 
   return (
     <div className="space-y-6">
@@ -73,8 +90,25 @@ export function TopicLandscapeView() {
           </div>
         ) : (
           <div className="relative">
+            <div className="mb-3 relative">
+            <input
+              type="text"
+              placeholder="Search papers by title or topic..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full rounded-lg bg-secondary px-4 py-2 text-sm text-card-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+            {searchQuery && (
+              <button 
+                onClick={() => setSearchQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                ✕
+              </button>
+            )}
+          </div>
             <svg viewBox="0 0 700 450" className="h-[450px] w-full">
-              {normalizedPoints.map((point, index) => (
+              {visiblePoints.map((point, index) => (
                 <circle
                   key={point.paper_id ?? index}
                   cx={point.svgX}
@@ -107,9 +141,27 @@ export function TopicLandscapeView() {
 
         {clusters.length > 0 && (
           <div className="mt-4 flex flex-wrap items-center justify-center gap-4">
+            {activeCluster !== null && (
+              <button
+                onClick={() => setActiveCluster(null)}
+                className="text-xs text-primary hover:underline w-full text-center mb-2"
+              >
+                ← Show all clusters
+              </button>
+            )}
             {clusters.map((cluster) => (
-              <div key={cluster.id} className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full" style={{ backgroundColor: cluster.color }} />
+              <div
+                key={cluster.id}
+                onClick={() => setActiveCluster(activeCluster === cluster.id ? null : cluster.id)}
+                className={`flex items-center gap-2 cursor-pointer rounded px-2 py-1 transition-all ${
+                  activeCluster === cluster.id
+                    ? "bg-secondary ring-1 ring-primary"
+                    : activeCluster !== null
+                    ? "opacity-40 hover:opacity-100"
+                    : "hover:bg-secondary/50"
+                }`}
+              >
+                <span className="h-3 w-3 rounded-full shrink-0" style={{ backgroundColor: cluster.color }} />
                 <span className="text-sm text-muted-foreground">{cluster.name}</span>
               </div>
             ))}
@@ -119,9 +171,9 @@ export function TopicLandscapeView() {
 
       <div className="rounded-lg bg-card p-5">
         <p className="text-sm text-muted-foreground">
-          Each point is a paper positioned by its UMAP coordinates from BERTopic. Hover a point to see the title.
+          Each point is a paper positioned by its UMAP coordinates from BERTopic. Hover a point to see the title. Click a cluster in the legend to filter.
           {normalizedPoints.length > 0 && (
-            <span className="ml-1 text-muted-foreground">Showing {normalizedPoints.length.toLocaleString()} papers.</span>
+            <span className="ml-1 text-muted-foreground">Showing {visiblePoints.length.toLocaleString()} of {normalizedPoints.length.toLocaleString()} papers.</span>
           )}
         </p>
       </div>
