@@ -11,7 +11,7 @@ python-dotenv
 arxiv
 
 # Spark / Hive connectivity
-pyhive[hive]
+pyhive
 thrift
 thrift-sasl
 pure-sasl
