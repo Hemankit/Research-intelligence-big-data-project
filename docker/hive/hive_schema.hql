@@ -1,17 +1,14 @@
--- ============================================================================
--- Research Intelligence Pipeline — Hive Schema DDL
+-- Research Intelligence Pipeline: Hive Schema DDL
 -- Run via:  beeline -u jdbc:hive2://localhost:10000 -f hive_schema.hql
 -- Or from Python:  cursor.execute(open('hive_schema.hql').read())
--- ============================================================================
 
 CREATE DATABASE IF NOT EXISTS research_intel;
 USE research_intel;
 
--- ────────────────────────────────────────────────────────────────────────────
--- 1. papers — consolidated record per paper (arXiv + S2ORC + OpenAlex)
+
+-- 1. papers: consolidated record per paper (arXiv + S2ORC + OpenAlex)
 --    Populated by: Spark consolidation job + BERTopic output merge
 --    Queried by:   FastAPI /landscape, /entities, /knowledge-table
--- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS papers (
     paper_id            STRING      COMMENT 'arXiv ID format, e.g. 2603.24594',
     title               STRING,
@@ -53,11 +50,9 @@ STORED AS PARQUET
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 
--- ────────────────────────────────────────────────────────────────────────────
--- 2. trends — pre-aggregated counts for the Trends Over Time chart
+-- 2. trends: pre-aggregated counts for the Trends Over Time chart
 --    Populated by: Spark aggregation job (nightly via Airflow)
 --    Queried by:   FastAPI /trends
--- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS trends (
     primary_category    STRING      COMMENT 'arXiv category, e.g. cs.LG',
     topic_cluster       STRING      COMMENT 'BERTopic topic name',
@@ -72,11 +67,10 @@ STORED AS PARQUET
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 
--- ────────────────────────────────────────────────────────────────────────────
--- 3. citation_edges — raw citation graph for Spark GraphX
+
+-- 3. citation_edges: raw citation graph for Spark GraphX
 --    Populated by: S2ORC ingestion (edges written to HDFS, loaded here)
 --    Queried by:   Spark GraphX PageRank job
--- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS citation_edges (
     citing_id           STRING      COMMENT 'arXiv ID of the citing paper',
     cited_id            STRING      COMMENT 'arXiv ID of the cited paper',
@@ -87,14 +81,13 @@ STORED AS PARQUET
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 
--- ────────────────────────────────────────────────────────────────────────────
--- 4. paper_fulltext — parsed full-text bodies from S2ORC bulk corpus
+
+-- 4. paper_fulltext: parsed full-text bodies from S2ORC bulk corpus
 --    Populated by: spark_consolidate.py consolidate_fulltext()
 --                  (reads from HDFS raw/s2orc/s2orc_fulltext/)
 --    Queried by:   BERTopic job, NER pipeline, Elasticsearch indexer
 --    NOTE: Kept separate from papers (Option B) so metadata queries stay
 --    fast. Join on paper_id when full text is needed.
--- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS paper_fulltext (
     paper_id            STRING      COMMENT 'Primary join key: arXiv ID or S2ORC corpusid',
     arxiv_id            STRING      COMMENT 'arXiv ID if available (NNNN.NNNNN format) — joins to papers.paper_id for arXiv papers',
@@ -111,11 +104,7 @@ COMMENT 'Full-text paper bodies from S2ORC bulk corpus — separate from papers 
 STORED AS PARQUET
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
-
-
--- ────────────────────────────────────────────────────────────────────────────
 -- Verification queries (run after loading data to sanity-check)
--- ────────────────────────────────────────────────────────────────────────────
 -- SHOW TABLES;
 -- DESCRIBE FORMATTED papers;
 -- DESCRIBE FORMATTED paper_fulltext;
