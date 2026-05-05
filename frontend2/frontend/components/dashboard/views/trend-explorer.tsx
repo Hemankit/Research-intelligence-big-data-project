@@ -73,7 +73,7 @@ export function TrendExplorerView() {
       </div>
 
       <div className="rounded-lg bg-card p-5">
-        <h3 className="mb-4 text-lg font-semibold text-card-foreground">Paper Count Over Time</h3>
+        <h3 className="mb-4 text-lg font-semibold text-card-foreground">Paper Count Over Submission Date</h3>
         {loading ? (
           <div className="flex h-[300px] items-center justify-center">
             <p className="text-muted-foreground text-sm">Loading trends...</p>

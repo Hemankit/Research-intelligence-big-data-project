@@ -403,7 +403,7 @@ def get_paper_detail(paper_id: str):
 @api.get("/topics/landscape")
 def get_landscape(
     category: Optional[str] = Query(None, description="Filter by category"),
-    limit: int = Query(5000, ge=1, le=10000, description="Max points"),
+    limit: int = Query(5000, ge=1, le=20000, description="Max points"),
 ):
     """
     Return UMAP 2D coordinates for the topic landscape map.

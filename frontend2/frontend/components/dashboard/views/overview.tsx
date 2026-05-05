@@ -77,7 +77,7 @@ export function OverviewView() {
       </div>
 
       <div className="rounded-lg bg-card p-5">
-        <h3 className="mb-4 text-lg font-semibold text-card-foreground">Papers Ingested by Month</h3>
+        <h3 className="mb-4 text-lg font-semibold text-card-foreground">Papers via submission date</h3>
         {monthlyData.length > 0 ? (
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={monthlyData}>

@@ -30,15 +30,6 @@ If a fine-tuned scientific NER model with native METHOD/DATASET/TASK labels
 becomes available, remove LABEL_MAP and the _map_entity_type() call —
 the rest of the pipeline will work unchanged.
 """
-"""
-extractor.py — per-document entity extraction with BIO tag decoding.
-
-Label mapping for dslim/bert-base-NER:
-    ORG  → METHOD  (model names, frameworks: "BERT", "PyTorch", "ResNet")
-    MISC → TASK    (research tasks: "machine translation", "object detection")
-    PER  → skip
-    LOC  → skip
-"""
 from .ner_model import NERModel
 
 LABEL_MAP = {
