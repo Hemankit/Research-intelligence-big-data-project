@@ -17,6 +17,7 @@ Usage:
 """
 
 import logging
+from collections import defaultdict
 import threading
 _hive_lock = threading.Lock()
 import os
@@ -403,6 +404,9 @@ def get_paper_detail(paper_id: str):
 @api.get("/topics/landscape")
 def get_landscape(
     category: Optional[str] = Query(None, description="Filter by category"),
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM or YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM or YYYY-MM-DD)"),
+    min_pagerank: Optional[float] = Query(None, ge=0, description="Minimum PageRank score"),
     limit: int = Query(5000, ge=1, le=20000, description="Max points"),
 ):
     """
@@ -411,6 +415,7 @@ def get_landscape(
     """
     sql = f"""
         SELECT p.paper_id, p.title, p.primary_category,
+             p.submitted_date,
                p.topic_cluster, p.topic_cluster_id,
                p.umap_x, p.umap_y,
                s.pagerank_score
@@ -419,7 +424,13 @@ def get_landscape(
         WHERE p.umap_x IS NOT NULL AND p.umap_y IS NOT NULL
     """
     if category:
-        sql += f" AND p.primary_category = '{category}'"
+        sql += f" AND p.primary_category = '{_esc(category)}'"
+    if start:
+        sql += f" AND p.submitted_date >= '{_esc(start)}'"
+    if end:
+        sql += f" AND p.submitted_date <= '{_esc(end)}'"
+    if min_pagerank is not None:
+        sql += f" AND COALESCE(s.pagerank_score, 0) >= {float(min_pagerank)}"
     sql += f" LIMIT {limit}"
 
     try:
@@ -438,6 +449,80 @@ def get_landscape(
 
 _cached_stats = None
 _stats_lock = threading.Lock()
+
+
+def _build_topic_trend_signals(rows: list[dict], window: int = 3) -> dict:
+    """
+    Classify topic clusters as emerging/stable/declining from month-over-month trends.
+
+    Strategy:
+    - Aggregate each topic's monthly counts in chronological order.
+    - Compare average paper_count in the recent window vs the previous window.
+    - Label by relative growth rate.
+    """
+    series = defaultdict(list)
+    for row in rows:
+        topic = row.get("topic_cluster")
+        month = row.get("year_month")
+        count = row.get("paper_count") or 0
+        if not topic or not month:
+            continue
+        try:
+            count_value = int(count)
+        except Exception:
+            count_value = 0
+        series[topic].append((str(month), count_value))
+
+    emerging = []
+    stable = []
+    declining = []
+
+    for topic, points in series.items():
+        points.sort(key=lambda x: x[0])
+        monthly_counts = [c for _, c in points]
+        if len(monthly_counts) < 2:
+            continue
+
+        effective_window = min(window, max(1, len(monthly_counts) // 2))
+        if len(monthly_counts) < effective_window + 1:
+            continue
+
+        recent = monthly_counts[-effective_window:]
+        prev = monthly_counts[-(2 * effective_window):-effective_window]
+        if not prev:
+            prev = monthly_counts[:-effective_window]
+        if not prev:
+            continue
+
+        recent_avg = sum(recent) / len(recent)
+        prev_avg = sum(prev) / len(prev)
+        growth = (recent_avg - prev_avg) / max(prev_avg, 1.0)
+
+        item = {
+            "topic_cluster": topic,
+            "growth_rate": round(growth, 3),
+            "growth_pct": round(growth * 100, 1),
+            "recent_avg_papers": round(recent_avg, 2),
+        }
+
+        if growth >= 0.25:
+            emerging.append(item)
+        elif growth <= -0.15:
+            declining.append(item)
+        else:
+            stable.append(item)
+
+    emerging.sort(key=lambda x: x["growth_rate"], reverse=True)
+    declining.sort(key=lambda x: x["growth_rate"])
+    stable.sort(key=lambda x: x["recent_avg_papers"], reverse=True)
+
+    return {
+        "emerging": emerging[:4],
+        "stable": stable[:4],
+        "declining": declining[:4],
+        "method": "recent_vs_prior_window_avg",
+        "window_months": window,
+    }
 
 def get_cached_stats():
     global _cached_stats
@@ -467,6 +552,26 @@ def get_cached_stats():
                 FROM trends
                 WHERE topic_cluster IS NOT NULL
             """)
+            dominant_topics_rows = query_hive("""
+                SELECT topic_cluster,
+                       SUM(paper_count) as paper_count
+                FROM trends
+                WHERE topic_cluster IS NOT NULL
+                  AND topic_cluster != ''
+                GROUP BY topic_cluster
+                ORDER BY paper_count DESC
+                LIMIT 6
+            """)
+            trend_signal_rows = query_hive("""
+                SELECT topic_cluster, year_month,
+                       SUM(paper_count) as paper_count
+                FROM trends
+                WHERE topic_cluster IS NOT NULL
+                  AND topic_cluster != ''
+                GROUP BY topic_cluster, year_month
+                ORDER BY topic_cluster ASC, year_month ASC
+            """)
+            trend_signals = _build_topic_trend_signals(trend_signal_rows)
             ner_rows = query_hive("""
                 SELECT COUNT(*) as ner_papers
                 FROM papers
@@ -493,6 +598,10 @@ def get_cached_stats():
                     "months_covered": trends_rows[0]["months_covered"] if trends_rows else 14,
                     "topic_count": trends_rows[0]["topic_count"] if trends_rows else 257,
                 },
+                "snapshot": {
+                    "dominant_topics": dominant_topics_rows if dominant_topics_rows else [],
+                    "trend_signals": trend_signals,
+                },
                 "ner": {
                     "ner_papers": ner_rows[0]["ner_papers"] if ner_rows else 5602,
                 },
@@ -504,6 +613,13 @@ def get_cached_stats():
                 "citations": {"total_edges": 114233},
                 "pagerank": {"scored_papers": 23084, "max_pagerank": 1.0, "avg_pagerank": 0.24},
                 "trends": {"months_covered": 14, "topic_count": 257},
+                "snapshot": {
+                    "dominant_topics": [],
+                    "trend_signals": {
+                        "emerging": [], "stable": [], "declining": [],
+                        "method": "recent_vs_prior_window_avg", "window_months": 3,
+                    },
+                },
                 "ner": {"ner_papers": 5602},
             }
         return _cached_stats

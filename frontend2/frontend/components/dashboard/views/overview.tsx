@@ -15,6 +15,12 @@ const categoryColors: Record<string, string> = {
   "cs.IR": "bg-[#BA7517]/20 text-[#BA7517]",
 }
 
+const signalStyles = {
+  emerging: "bg-[#1D9E75]/20 text-[#1D9E75]",
+  stable: "bg-[#378ADD]/20 text-[#378ADD]",
+  declining: "bg-[#D85A30]/20 text-[#D85A30]",
+}
+
 export function OverviewView() {
   const [stats, setStats] = useState<any>(null)
   const [topPapers, setTopPapers] = useState<any[]>([])
@@ -57,6 +63,11 @@ export function OverviewView() {
   const scoredPapers = stats?.pagerank?.scored_papers?.toLocaleString() ?? "—"
   const topicCount = stats?.trends?.topic_count?.toString() ?? "—"
   const totalEdges = stats?.citations?.total_edges?.toLocaleString() ?? "—"
+  const dominantTopics = stats?.snapshot?.dominant_topics ?? []
+  const trendSignals = stats?.snapshot?.trend_signals ?? { emerging: [], stable: [], declining: [] }
+  const maxDominantTopicCount = dominantTopics.length > 0
+    ? Math.max(...dominantTopics.map((t: any) => t.paper_count || 0), 1)
+    : 1
 
   if (loading) {
     return (
@@ -100,7 +111,7 @@ export function OverviewView() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <div className="rounded-lg bg-card p-5">
           <h3 className="mb-4 text-lg font-semibold text-card-foreground">Top Papers by PageRank</h3>
           {topPapers.length > 0 ? (
@@ -138,6 +149,66 @@ export function OverviewView() {
           ) : (
             <p className="text-sm text-muted-foreground">No papers found.</p>
           )}
+        </div>
+
+        <div className="rounded-lg bg-card p-5">
+          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Dominant Topic Clusters</h3>
+          {dominantTopics.length > 0 ? (
+            <ul className="space-y-3">
+              {dominantTopics.map((topic: any, index: number) => (
+                <li key={`${topic.topic_cluster}-${index}`} className="space-y-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="truncate text-sm text-card-foreground">{topic.topic_cluster || "Unknown"}</p>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {(topic.paper_count ?? 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-secondary">
+                    <div
+                      className="h-full rounded-full bg-[#7F77DD]"
+                      style={{ width: `${((topic.paper_count ?? 0) / maxDominantTopicCount) * 100}%` }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">No topic cluster breakdown yet.</p>
+          )}
+        </div>
+
+        <div className="rounded-lg bg-card p-5">
+          <h3 className="mb-4 text-lg font-semibold text-card-foreground">Trend Signals</h3>
+          <div className="space-y-3">
+            {(["emerging", "stable", "declining"] as const).map((kind) => {
+              const rows = trendSignals[kind] ?? []
+              return (
+                <div key={kind}>
+                  <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    {kind}
+                  </p>
+                  {rows.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {rows.map((row: any, index: number) => (
+                        <span
+                          key={`${kind}-${row.topic_cluster}-${index}`}
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${signalStyles[kind]}`}
+                          title={`Growth ${row.growth_pct > 0 ? "+" : ""}${row.growth_pct}%`}
+                        >
+                          {row.topic_cluster}
+                          <span className="opacity-80">
+                            ({row.growth_pct > 0 ? "+" : ""}{row.growth_pct}%)
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No topics</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
 
         <div className="rounded-lg bg-card p-5">

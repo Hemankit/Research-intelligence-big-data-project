@@ -14,21 +14,42 @@ export function TopicLandscapeView() {
   const [activeCluster, setActiveCluster] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [pointLimit, setPointLimit] = useState(3000)
-  const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number; title: string } | null>(null)
   const [matchedIds, setMatchedIds] = useState<Set<string> | null>(null)
   const [searching, setSearching] = useState(false)
+  const [category, setCategory] = useState<string>("all")
+  const [startDate, setStartDate] = useState<string>("")
+  const [endDate, setEndDate] = useState<string>("")
+  const [minInfluence, setMinInfluence] = useState<string>("")
+  const [hoveredPoint, setHoveredPoint] = useState<{
+    x: number
+    y: number
+    title: string
+    year?: string
+    topic?: string
+    category?: string
+    influence?: number | null
+  } | null>(null)
 
   useEffect(() => {
-  setLoading(true)
-  fetchLandscape(pointLimit)
-    .then((data) => setPoints(data.points || []))
-    .catch(console.error)
-    .finally(() => setLoading(false))
-}, [pointLimit])
+    setLoading(true)
+    fetchLandscape({
+      limit: pointLimit,
+      category,
+      start: startDate || undefined,
+      end: endDate || undefined,
+      min_pagerank: minInfluence !== "" ? Number(minInfluence) : undefined,
+    })
+      .then((data) => setPoints(data.points || []))
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [pointLimit, category, startDate, endDate, minInfluence])
 
-  // ES semantic search with debounce
+  // ES semantic search with debounce.
   useEffect(() => {
-    if (!searchQuery.trim()) { setMatchedIds(null); return }
+    if (!searchQuery.trim()) {
+      setMatchedIds(null)
+      return
+    }
     const timer = setTimeout(() => {
       setSearching(true)
       const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
@@ -93,6 +114,57 @@ export function TopicLandscapeView() {
 
   return (
     <div className="space-y-6">
+      <div className="rounded-lg bg-card p-5">
+        <h3 className="mb-4 text-lg font-semibold text-card-foreground">Landscape Filters</h3>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div>
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Category</p>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-secondary px-3 text-sm text-card-foreground"
+            >
+              <option value="all">All categories</option>
+              <option value="cs.LG">cs.LG</option>
+              <option value="cs.CL">cs.CL</option>
+              <option value="cs.CV">cs.CV</option>
+              <option value="cs.AI">cs.AI</option>
+              <option value="cs.IR">cs.IR</option>
+            </select>
+          </div>
+          <div>
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Start Date</p>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-secondary px-3 text-sm text-card-foreground"
+            />
+          </div>
+          <div>
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">End Date</p>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="h-10 w-full rounded-md border border-border bg-secondary px-3 text-sm text-card-foreground"
+            />
+          </div>
+          <div>
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Min Influence</p>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              value={minInfluence}
+              onChange={(e) => setMinInfluence(e.target.value)}
+              placeholder="e.g. 0.02"
+              className="h-10 w-full rounded-md border border-border bg-secondary px-3 text-sm text-card-foreground placeholder:text-muted-foreground"
+            />
+          </div>
+        </div>
+      </div>
+
       <div className="rounded-lg bg-card p-5">
         <h3 className="mb-4 text-lg font-semibold text-card-foreground">Topic Clusters (UMAP Projection)</h3>
 
@@ -163,23 +235,40 @@ export function TopicLandscapeView() {
                   fill={getColor(point.topic_cluster_id ?? -1)}
                   opacity={matchedIds !== null ? 1.0 : 0.7}
                   className="cursor-pointer transition-all hover:opacity-100"
-                  onMouseEnter={() =>
-                    setHoveredPoint({ x: point.svgX, y: point.svgY, title: point.title || point.paper_id })
-                  }
+                  onMouseEnter={() => {
+                    const year = point.submitted_date ? String(point.submitted_date).slice(0, 4) : undefined
+                    setHoveredPoint({
+                      x: point.svgX,
+                      y: point.svgY,
+                      title: point.title || point.paper_id,
+                      year,
+                      topic: point.topic_cluster || undefined,
+                      category: point.primary_category || undefined,
+                      influence: point.pagerank_score,
+                    })
+                  }}
                   onMouseLeave={() => setHoveredPoint(null)}
                 />
               ))}
             </svg>
             {hoveredPoint && (
               <div
-                className="pointer-events-none absolute z-10 max-w-[220px] rounded-lg bg-popover px-3 py-2 text-sm text-popover-foreground shadow-lg border border-border"
+                className="pointer-events-none absolute z-10 max-w-[280px] rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-lg"
                 style={{
                   left: `${(hoveredPoint.x / 700) * 100}%`,
                   top: `${(hoveredPoint.y / 450) * 100}%`,
                   transform: "translate(-50%, -120%)",
                 }}
               >
-                {hoveredPoint.title}
+                <p className="line-clamp-2 font-medium text-card-foreground">{hoveredPoint.title}</p>
+                <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                  {hoveredPoint.year && <p>Year: {hoveredPoint.year}</p>}
+                  {hoveredPoint.topic && <p>Topic: {hoveredPoint.topic}</p>}
+                  {hoveredPoint.category && <p>Category: {hoveredPoint.category}</p>}
+                  {hoveredPoint.influence != null && (
+                    <p>Influence: {Number(hoveredPoint.influence).toFixed(3)}</p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -217,7 +306,8 @@ export function TopicLandscapeView() {
 
       <div className="rounded-lg bg-card p-5">
         <p className="text-sm text-muted-foreground">
-          Each point is a paper positioned by its UMAP coordinates from BERTopic. Hover a point to see the title. Click a cluster in the legend to filter.
+          Each point is a paper positioned by its UMAP coordinates from BERTopic. Hover a point to see title,
+          year, topic, category, and influence score. Click a cluster in the legend to filter.
           {normalizedPoints.length > 0 && (
             <span className="ml-1 text-muted-foreground">Showing {visiblePoints.length.toLocaleString()} of {normalizedPoints.length.toLocaleString()} papers.</span>
           )}
