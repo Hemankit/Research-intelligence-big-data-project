@@ -1,6 +1,6 @@
 "use client"
 
-import { LayoutDashboard, TrendingUp, ScatterChart, Table, FileText, Database, Network, Cpu, BookOpen } from "lucide-react"
+import { LayoutDashboard, TrendingUp, ScatterChart, Table, Database, Network, Cpu, BookOpen, Lightbulb, AlertTriangle } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface SidebarProps {
@@ -14,6 +14,8 @@ const mainNavItems = [
   { id: "topics", label: "Topic Landscape", icon: ScatterChart },
   { id: "table", label: "Knowledge Table", icon: Table },
   { id: "reading", label: "Reading Path", icon: BookOpen },
+  { id: "idea", label: "Idea Validation", icon: Lightbulb },
+  { id: "limitations", label: "Limitations Panel", icon: AlertTriangle },
 ]
 
 const dataNavItems = [

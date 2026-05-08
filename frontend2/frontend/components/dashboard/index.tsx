@@ -11,6 +11,8 @@ import { GraphStatsView } from "./views/graph-stats"
 import { IngestionLogView } from "./views/ingestion-log"
 import { NERPipelineView } from "./views/ner-pipeline"
 import { ReadingPathView } from "./views/reading-path"
+import { IdeaValidationView } from "./views/idea-validation"
+import { LimitationsAggregationView } from "./views/limitations-aggregation"
 
 export function Dashboard() {
   const [activeView, setActiveView] = useState("overview")
@@ -45,7 +47,11 @@ export function Dashboard() {
       case "reading":
         return <ReadingPathView />
       case "ner":
-      return <NERPipelineView />
+        return <NERPipelineView />
+      case "idea":
+        return <IdeaValidationView />
+      case "limitations":
+        return <LimitationsAggregationView />
       default:
         return (
           <div className="flex h-[400px] items-center justify-center rounded-lg bg-card">

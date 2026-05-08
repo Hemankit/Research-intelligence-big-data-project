@@ -23,6 +23,7 @@ _hive_lock = threading.Lock()
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
+import re
 
 from fastapi import FastAPI, APIRouter, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +81,29 @@ def query_hive(sql: str) -> list[dict]:
 def _esc(value: str) -> str:
     """Escape a string value for safe interpolation into HiveQL."""
     return value.replace("'", "''")
+
+
+def _extract_limitation_sentences(text: str, max_items: int = 3) -> list[str]:
+    """Extract candidate limitation sentences using lightweight keyword matching."""
+    if not text:
+        return []
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    cues = (
+        "limitation", "limited", "future work", "challenge", "constraint",
+        "drawback", "however", "we leave", "remain", "bottleneck", "expensive",
+    )
+    out: list[str] = []
+    for sent in sentences:
+        s = sent.strip()
+        if len(s) < 30:
+            continue
+        lower = s.lower()
+        if any(cue in lower for cue in cues):
+            out.append(s[:280])
+        if len(out) >= max_items:
+            break
+    return out
 
 
 def get_es_client() -> Elasticsearch:
@@ -921,6 +945,152 @@ def nl_query(body: dict):
     if analysis_pipeline is None:
         raise HTTPException(status_code=503, detail="Analysis pipeline not ready")
     return run_analysis(query=query, pipeline=analysis_pipeline)
+
+
+@api.get("/ideas/validate")
+def validate_idea(
+    q: str = Query(..., min_length=3, description="Research idea or hypothesis"),
+    category: Optional[str] = Query(None, description="Optional category filter"),
+    limit: int = Query(20, ge=5, le=100, description="Evidence papers to inspect"),
+):
+    """
+    Provide lightweight idea validation signals from corpus evidence.
+    """
+    safe_q = _esc(q)
+    sql = f"""
+        SELECT p.paper_id, p.title, p.abstract, p.primary_category,
+               p.submitted_date, p.topic_cluster,
+               s.pagerank_score
+        FROM papers p
+        LEFT JOIN pagerank_scores s ON p.paper_id = s.paper_id
+        WHERE (LOWER(p.title) LIKE LOWER('%{safe_q}%') OR LOWER(p.abstract) LIKE LOWER('%{safe_q}%'))
+    """
+    if category:
+        sql += f" AND p.primary_category = '{_esc(category)}'"
+    sql += f"""
+        ORDER BY COALESCE(s.pagerank_score, 0) DESC, p.submitted_date DESC
+        LIMIT {limit}
+    """
+
+    try:
+        rows = query_hive(sql)
+    except Exception as e:
+        logger.error("Idea validation query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    support_cues = ("improve", "state-of-the-art", "outperform", "effective", "robust", "gain")
+    caution_cues = ("limited", "limitation", "challenge", "however", "future work", "expensive")
+
+    supporting = 0
+    cautionary = 0
+    topic_counts: dict[str, int] = defaultdict(int)
+    evidence = []
+    for row in rows:
+        abstract = row.get("abstract") or ""
+        low = abstract.lower()
+        if any(c in low for c in support_cues):
+            supporting += 1
+        if any(c in low for c in caution_cues):
+            cautionary += 1
+        topic = (row.get("topic_cluster") or "Unknown").strip() or "Unknown"
+        topic_counts[topic] += 1
+        evidence.append({
+            "paper_id": row.get("paper_id"),
+            "title": row.get("title"),
+            "primary_category": row.get("primary_category"),
+            "submitted_date": row.get("submitted_date"),
+            "topic_cluster": row.get("topic_cluster"),
+            "pagerank_score": row.get("pagerank_score"),
+            "limitation_snippets": _extract_limitation_sentences(abstract, max_items=1),
+        })
+
+    topic_distribution = [
+        {"topic_cluster": topic, "paper_count": count}
+        for topic, count in sorted(topic_counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
+    ]
+
+    return {
+        "query": q,
+        "count": len(evidence),
+        "summary": {
+            "supporting_signals": supporting,
+            "cautionary_signals": cautionary,
+            "support_ratio": round(supporting / max(len(evidence), 1), 3),
+        },
+        "topic_distribution": topic_distribution,
+        "evidence": evidence,
+    }
+
+
+@api.get("/limitations/aggregate")
+def get_limitations_aggregate(
+    category: Optional[str] = Query(None, description="Optional category filter"),
+    topic_cluster: Optional[str] = Query(None, description="Optional topic cluster filter"),
+    limit: int = Query(250, ge=50, le=1000, description="Max papers scanned"),
+):
+    """
+    Aggregate recurring limitation themes from paper abstracts.
+    """
+    sql = """
+        SELECT paper_id, title, abstract, primary_category,
+               submitted_date, topic_cluster
+        FROM papers
+        WHERE abstract IS NOT NULL AND LENGTH(TRIM(abstract)) > 0
+    """
+    if category:
+        sql += f" AND primary_category = '{_esc(category)}'"
+    if topic_cluster:
+        sql += f" AND topic_cluster = '{_esc(topic_cluster)}'"
+    sql += f" ORDER BY submitted_date DESC LIMIT {limit}"
+
+    try:
+        rows = query_hive(sql)
+    except Exception as e:
+        logger.error("Limitations aggregation query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    theme_patterns = {
+        "data_scarcity": ("limited data", "small dataset", "data scarcity", "insufficient data"),
+        "compute_cost": ("computationally expensive", "high compute", "costly", "resource-intensive"),
+        "generalization": ("does not generalize", "domain shift", "out-of-distribution", "distribution shift"),
+        "evaluation_scope": ("limited evaluation", "few benchmarks", "evaluation is limited", "single dataset"),
+        "interpretability": ("lack interpretability", "black-box", "hard to interpret", "explainability"),
+    }
+
+    themes: dict[str, dict] = {
+        key: {"theme": key, "count": 0, "examples": []}
+        for key in theme_patterns
+    }
+    papers_with_limitations = 0
+
+    for row in rows:
+        abstract = row.get("abstract") or ""
+        low = abstract.lower()
+        snippets = _extract_limitation_sentences(abstract, max_items=2)
+        matched_any = False
+        for theme, patterns in theme_patterns.items():
+            if any(p in low for p in patterns):
+                matched_any = True
+                themes[theme]["count"] += 1
+                if len(themes[theme]["examples"]) < 3:
+                    themes[theme]["examples"].append({
+                        "paper_id": row.get("paper_id"),
+                        "title": row.get("title"),
+                        "topic_cluster": row.get("topic_cluster"),
+                        "snippet": snippets[0] if snippets else None,
+                    })
+        if matched_any:
+            papers_with_limitations += 1
+
+    ranked = sorted(themes.values(), key=lambda x: x["count"], reverse=True)
+    ranked = [r for r in ranked if r["count"] > 0]
+
+    return {
+        "scanned_papers": len(rows),
+        "papers_with_limitations": papers_with_limitations,
+        "themes": ranked,
+        "coverage_ratio": round(papers_with_limitations / max(len(rows), 1), 3),
+    }
 
 
 # Include the api router
